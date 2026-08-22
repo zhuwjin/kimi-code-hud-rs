@@ -1,7 +1,11 @@
-// Composing the one HUD line: badges, model+thinking, project+git, speed
-// (fleet TPS / gen clock / compaction / TTFT), cache hit rate and quota
-// bars. Degrades normal -> compact when the line exceeds 200 visible chars.
+// Composing the one HUD line in the host footer's own visual language:
+// mode/model/cwd/git slots copied byte-for-byte from the built-in footer
+// (two-space separated, host palette), followed by the extra HUD segments
+// (fleet TPS / gen clock / compaction / TTFT, cache hit rate, quota bars).
+// Slot order is configurable via config.json `items`. Degrades
+// normal -> compact when the line exceeds 200 visible chars.
 
+use crate::git_status::GitSummary;
 use crate::metrics::MetricsSummary;
 use crate::payload::Payload;
 use crate::quota::QuotaCache;
@@ -13,16 +17,48 @@ const RESET: &str = "\x1b[0m";
 const BAR_WIDTH: usize = 10;
 const MAX_WIDTH: usize = 200;
 
+/// Default slot order: the host footer's four slots, then the HUD extras.
+pub const DEFAULT_ITEMS: [&str; 7] = ["mode", "model", "cwd", "git", "speed", "cache", "quota"];
+
+/// cwd slot rendering style. Short is the host footer's own abbreviation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CwdStyle {
+    /// `~` + at most 3 trailing segments, `…/` prefix when longer (host default).
+    #[default]
+    Short,
+    /// `~`-abbreviated full path.
+    Full,
+    /// Last path component only.
+    Name,
+}
+
+impl CwdStyle {
+    pub fn parse(value: Option<&str>) -> Option<CwdStyle> {
+        match value {
+            Some("short") => Some(CwdStyle::Short),
+            Some("full") => Some(CwdStyle::Full),
+            Some("name") => Some(CwdStyle::Name),
+            _ => None,
+        }
+    }
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> String {
     format!("{}38;2;{};{};{}m", ESC, r, g, b)
 }
 
-/// The theme-dependent slots. ANSI slots are theme-independent (the terminal
-/// remaps them per its own theme); badges and bar levels follow the resolved
-/// theme. Base hex values mirror the host's dark/light palettes.
+fn bold(color: String) -> String {
+    format!("\x1b[1m{color}")
+}
+
+/// The theme-dependent slots, mirroring the host's dark/light palettes
+/// (tui/theme/colors.ts). Bar levels keep the host's diff/success hues;
+/// everything the footer itself renders — mode badges, model, cwd, git —
+/// uses the exact token values the host would have used.
 pub struct Palette {
-    pub bright_red: String,
-    pub muted: String,
+    pub text: String,
+    pub text_dim: String,
+    pub text_muted: String,
     pub warning: String,
     pub primary: String,
     pub accent: String,
@@ -33,29 +69,28 @@ pub struct Palette {
 
 fn dark_palette() -> Palette {
     Palette {
-        bright_red: "\x1b[91m".to_string(),
-        muted: "\x1b[90m".to_string(),
-        warning: rgb(232, 168, 56),   // #E8A838 — auto/yolo badges
-        primary: rgb(79, 168, 255),   // #4FA8FF — model/plan badge
-        accent: rgb(91, 192, 190),    // #5BC0BE — swarm badge
+        text: rgb(224, 224, 224),      // #E0E0E0 — model label
+        text_dim: rgb(136, 136, 136),  // #888888 — cwd / git badge
+        text_muted: rgb(107, 107, 107), // #6B6B6B — provisional readings
+        warning: bold(rgb(232, 168, 56)),  // #E8A838 — auto/yolo badges
+        primary: bold(rgb(79, 168, 255)),  // #4FA8FF — plan badge
+        accent: bold(rgb(91, 192, 190)),   // #5BC0BE — swarm badge
         bar_red: "\x1b[31m".to_string(),
         bar_yellow: "\x1b[33m".to_string(),
         bar_green: "\x1b[32m".to_string(),
     }
 }
 
-/// Light theme: badges go bold — short labels need the extra weight on a
-/// white background; the bar takes the host's calmer light error/success
-/// hues instead of the terminal's glaring ANSI red.
 fn light_palette() -> Palette {
     Palette {
-        bright_red: "\x1b[1;91m".to_string(),
-        muted: "\x1b[90m".to_string(),
-        warning: format!("\x1b[1m{}", rgb(217, 119, 6)),   // bold #D97706
-        primary: format!("\x1b[1m{}", rgb(21, 101, 192)),   // bold #1565C0
-        accent: format!("\x1b[1m{}", rgb(20, 184, 166)),    // bold #14B8A6
+        text: rgb(26, 26, 26),         // #1A1A1A
+        text_dim: rgb(69, 69, 69),     // #454545
+        text_muted: rgb(95, 95, 95),   // #5F5F5F
+        warning: bold(rgb(146, 102, 10)),  // #92660A
+        primary: bold(rgb(21, 101, 192)),  // #1565C0
+        accent: bold(rgb(0, 131, 143)),    // #00838F
         bar_red: rgb(185, 28, 28),   // #B91C1C — host light error
-        bar_yellow: rgb(217, 119, 6), // #D97706
+        bar_yellow: rgb(146, 102, 10), // #92660A — host light warning
         bar_green: rgb(14, 122, 56),  // #0E7A38 — host light success
     }
 }
@@ -241,86 +276,169 @@ pub struct RenderContext<'a> {
     pub payload: &'a Payload,
     pub quota: Option<&'a QuotaCache>,
     pub metrics: &'a MetricsSummary,
-    pub git_dirty: bool,
+    pub git: GitSummary,
+    pub items: &'a [String],
+    pub cwd_style: CwdStyle,
     pub layout: &'a str,
     pub color: bool,
     pub theme: Theme,
     pub now: u64,
 }
 
-fn badges(ctx: &RenderContext, palette: &Palette) -> Vec<String> {
-    let mut out = Vec::new();
-    let mode = ctx.payload.permission_mode.as_deref();
-    if mode == Some("yolo") {
-        out.push(colorize(ctx.color, &palette.warning, "[yolo]"));
-    } else if mode == Some("auto") {
-        out.push(colorize(ctx.color, &palette.bright_red, "[auto]"));
-    } else {
-        out.push(colorize(ctx.color, &palette.muted, "[manual]"));
+/// The footer's mode slot: auto/yolo (warning), plan (primary), swarm
+/// (accent) — all bold, bracket-free, single-space joined inside the slot.
+/// Other permission modes render nothing, exactly like the host.
+fn mode_slot(ctx: &RenderContext, palette: &Palette) -> Option<String> {
+    let mut modes: Vec<String> = Vec::new();
+    match ctx.payload.permission_mode.as_deref() {
+        Some("auto") | Some("yolo") => {
+            let mode = ctx.payload.permission_mode.as_deref().unwrap_or_default();
+            modes.push(colorize(ctx.color, &palette.warning, mode));
+        }
+        _ => {}
     }
     if ctx.payload.plan_mode.unwrap_or(false) {
-        out.push(colorize(ctx.color, &palette.primary, "[plan]"));
+        modes.push(colorize(ctx.color, &palette.primary, "plan"));
     }
     if ctx.metrics.swarm_mode || ctx.payload.swarm_mode.unwrap_or(false) {
-        out.push(colorize(ctx.color, &palette.accent, "[swarm]"));
+        modes.push(colorize(ctx.color, &palette.accent, "swarm"));
     }
-    out
+    (!modes.is_empty()).then(|| modes.join(" "))
 }
 
-fn model_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> String {
+/// The footer's model slot: model display name in plain text color with the
+/// host's thinking suffix (" thinking" / " thinking: <effort>", none when
+/// off). An unconfirmed inference renders the suffix muted, like the
+/// provisional TPS reading.
+fn model_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
+    let model = sanitize_terminal_text(ctx.payload.model.as_deref().unwrap_or(""));
+    if model.is_empty() {
+        return None;
+    }
+    let mut segment = colorize(ctx.color, &palette.text, &model);
     let level = ctx
         .metrics
         .thinking_level
         .as_deref()
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && *l != "off")
         .map(sanitize_terminal_text);
-    let mut segment = colorize(
-        ctx.color,
-        &palette.primary,
-        &sanitize_terminal_text(ctx.payload.model.as_deref().unwrap_or("")),
-    );
-    if let Some(level) = level.filter(|l| l != "off") {
-        // Effort-capable models show the bare level; boolean thinking keeps
-        // the " thinking" label (compact: " on"). An unconfirmed inference
-        // renders muted, like the provisional TPS reading.
-        let suffix = if level == "on" && !compact {
+    if let Some(level) = level {
+        let suffix = if level == "on" {
             " thinking".to_string()
         } else {
-            format!(" {}", level)
+            format!(" thinking: {}", level)
         };
         segment.push_str(&if ctx.metrics.thinking_provisional {
-            colorize(ctx.color, &palette.muted, &suffix)
+            colorize(ctx.color, &palette.text_muted, &suffix)
         } else {
             suffix
         });
     }
-    segment
+    Some(segment)
 }
 
-fn project_segment(ctx: &RenderContext, compact: bool) -> Option<String> {
-    let cwd = ctx.payload.cwd.as_deref().map(sanitize_terminal_text).unwrap_or_default();
-    let project = if !compact && !cwd.is_empty() {
-        Some(
-            cwd.rsplit(['/', '\\'])
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&cwd)
-                .to_string(),
-        )
-    } else {
-        None
-    };
-    let branch = ctx.payload.git_branch.as_deref().map(sanitize_terminal_text);
-    match branch.filter(|b| !b.is_empty()) {
-        Some(branch) => {
-            let git = format!("git:({}{})", branch, if ctx.git_dirty { "*" } else { "" });
-            Some(match project {
-                Some(project) => format!("{} {}", project, git),
-                None => git,
-            })
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+}
+
+/// `~`-abbreviate like the host's shortenCwd: exact home becomes `~`, a home
+/// prefix becomes `~/…`.
+fn abbreviate_home(path: &str, home: Option<&str>) -> String {
+    if let Some(home) = home.filter(|h| !h.is_empty()) {
+        if path == home {
+            return "~".to_string();
         }
-        None => project,
+        if let Some(rest) = path.strip_prefix(home).filter(|r| r.starts_with('/')) {
+            return format!("~{}", rest);
+        }
     }
+    path.to_string()
+}
+
+fn cwd_last_component(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// The footer's cwd slot (textDim): host-style `…/` abbreviation by default,
+/// or the full path / last component per config. Compact degrades
+/// full -> short -> name.
+fn cwd_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<String> {
+    let cwd = sanitize_terminal_text(ctx.payload.cwd.as_deref().unwrap_or(""));
+    if cwd.is_empty() {
+        return None;
+    }
+    let style = match (ctx.cwd_style, compact) {
+        (CwdStyle::Full, true) => CwdStyle::Short,
+        (CwdStyle::Short, true) => CwdStyle::Name,
+        (style, _) => style,
+    };
+    let home = home_dir();
+    let text = match style {
+        CwdStyle::Full => abbreviate_home(&cwd, home.as_deref()),
+        CwdStyle::Name => {
+            if home.as_deref() == Some(cwd.as_str()) {
+                "~".to_string()
+            } else {
+                cwd_last_component(&cwd)
+            }
+        }
+        CwdStyle::Short => {
+            let work = abbreviate_home(&cwd, home.as_deref());
+            let segments: Vec<&str> = work.split('/').filter(|s| !s.is_empty()).collect();
+            if segments.len() <= 3 {
+                work
+            } else {
+                format!("…/{}", segments[segments.len() - 3..].join("/"))
+            }
+        }
+    };
+    Some(colorize(ctx.color, &palette.text_dim, &text))
+}
+
+/// The footer's git badge (textDim), mirroring formatGitBadgeBase:
+/// `main` / `main [±]` / `main [+3 -1 ↑2 ↓1]`. The branch comes from the
+/// host payload when present, else from our own probe.
+fn git_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
+    let branch = ctx
+        .payload
+        .git_branch
+        .clone()
+        .or_else(|| ctx.git.branch.clone())
+        .map(|b| sanitize_terminal_text(&b))
+        .filter(|b| !b.is_empty());
+    let branch = branch?;
+    let mut parts: Vec<String> = Vec::new();
+    if ctx.git.diff_added > 0 || ctx.git.diff_deleted > 0 {
+        let mut diff: Vec<String> = Vec::new();
+        if ctx.git.diff_added > 0 {
+            diff.push(format!("+{}", ctx.git.diff_added));
+        }
+        if ctx.git.diff_deleted > 0 {
+            diff.push(format!("-{}", ctx.git.diff_deleted));
+        }
+        parts.push(diff.join(" "));
+    } else if ctx.git.dirty {
+        parts.push("±".to_string());
+    }
+    let mut sync = String::new();
+    if ctx.git.ahead > 0 {
+        sync.push_str(&format!("↑{}", ctx.git.ahead));
+    }
+    if ctx.git.behind > 0 {
+        sync.push_str(&format!("↓{}", ctx.git.behind));
+    }
+    if !sync.is_empty() {
+        parts.push(sync);
+    }
+    let text = if parts.is_empty() {
+        branch
+    } else {
+        format!("{} [{}]", branch, parts.join(" "))
+    };
+    Some(colorize(ctx.color, &palette.text_dim, &text))
 }
 
 fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<String> {
@@ -349,7 +467,7 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
         let average = tps.round();
         let paint = |text: &str| -> String {
             if metrics.tps_stale {
-                colorize(ctx.color, &palette.muted, text)
+                colorize(ctx.color, &palette.text_muted, text)
             } else {
                 text.to_string()
             }
@@ -391,7 +509,7 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
             return Some(format!("{} · compacting {}", paint(&base), c));
         }
         if let Some(c) = &compacted {
-            return Some(format!("{}{}", paint(&base), colorize(ctx.color, &palette.muted, &format!(" · compacted {}", c))));
+            return Some(format!("{}{}", paint(&base), colorize(ctx.color, &palette.text_muted, &format!(" · compacted {}", c))));
         }
         return match format_ttft(metrics.ttft_ms) {
             Some(ttft) => Some(paint(&format!("{} · TTFT {}", base, ttft))),
@@ -411,7 +529,7 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
     }
     if let Some(c) = &compacted {
         if !compact {
-            return Some(colorize(ctx.color, &palette.muted, &format!("compacted {}", c)));
+            return Some(colorize(ctx.color, &palette.text_muted, &format!("compacted {}", c)));
         }
     }
     format_ttft(metrics.ttft_ms).map(|ttft| format!("TTFT {}", ttft))
@@ -462,7 +580,23 @@ fn quota_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// Render the HUD line. Downgrades normal -> compact above 200 visible
+/// One configured slot by name; unknown names are skipped like the host's
+/// own items handling.
+fn slot_segment(ctx: &RenderContext, palette: &Palette, name: &str, compact: bool) -> Option<String> {
+    match name {
+        "mode" => mode_slot(ctx, palette),
+        "model" => model_segment(ctx, palette),
+        "cwd" => cwd_segment(ctx, palette, compact),
+        "git" => git_segment(ctx, palette),
+        "speed" => speed_segment(ctx, palette, compact),
+        "cache" => cache_segment(ctx),
+        "quota" => quota_segment(ctx, palette, compact),
+        _ => None,
+    }
+}
+
+/// Render the HUD line: the configured slots joined with the footer's
+/// two-space separator. Downgrades normal -> compact above 200 visible
 /// characters; the final fallback is the sanitized model name.
 pub fn render_hud(ctx: &RenderContext) -> String {
     let palette = palette_for(ctx.theme);
@@ -473,29 +607,15 @@ pub fn render_hud(ctx: &RenderContext) -> String {
         .unwrap_or(0);
     for layout in &layouts[start..] {
         let compact = *layout == "compact";
-        let prefix = badges(ctx, &palette);
-        let mut segments: Vec<String> = Vec::new();
-        let model = model_segment(ctx, &palette, compact);
-        if !model.is_empty() {
-            segments.push(model);
+        let mut slots: Vec<String> = Vec::new();
+        for name in ctx.items {
+            if let Some(segment) = slot_segment(ctx, &palette, name, compact) {
+                if !segment.is_empty() {
+                    slots.push(segment);
+                }
+            }
         }
-        if let Some(seg) = project_segment(ctx, compact) {
-            segments.push(seg);
-        }
-        if let Some(seg) = speed_segment(ctx, &palette, compact) {
-            segments.push(seg);
-        }
-        if let Some(seg) = cache_segment(ctx) {
-            segments.push(seg);
-        }
-        if let Some(seg) = quota_segment(ctx, &palette, compact) {
-            segments.push(seg);
-        }
-        let mut line_parts = prefix;
-        if !segments.is_empty() {
-            line_parts.push(segments.join(" │ "));
-        }
-        let line = line_parts.join(" ");
+        let line = slots.join("  ");
         if strip_ansi_sgr(&line).chars().count() <= MAX_WIDTH || compact {
             return line;
         }
@@ -522,16 +642,23 @@ mod tests {
         }
     }
 
+    fn default_items() -> Vec<String> {
+        DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect()
+    }
+
     fn ctx<'a>(
         payload: &'a Payload,
         metrics_value: &'a MetricsSummary,
         quota: Option<&'a QuotaCache>,
     ) -> RenderContext<'a> {
+        let items: &'a Vec<String> = Box::leak(Box::new(default_items()));
         RenderContext {
             payload,
             quota,
             metrics: metrics_value,
-            git_dirty: false,
+            git: GitSummary::default(),
+            items,
+            cwd_style: CwdStyle::Short,
             layout: "normal",
             color: false,
             theme: Theme::Dark,
@@ -544,12 +671,164 @@ mod tests {
         let payload = base_payload();
         let m = metrics();
         let line = render_hud(&ctx(&payload, &m, None));
-        assert!(line.contains("[manual]"));
+        // Manual mode renders no badge, exactly like the host footer.
+        assert!(!line.contains("manual"));
         assert!(line.contains("K3"));
-        assert!(line.contains("kimi-code-hud"));
-        assert!(line.contains("git:(main)"));
+        // cwd short style keeps ≤3 segments intact; git badge is bare branch.
+        assert!(line.contains("work/kimi-code-hud"));
+        assert!(line.contains("main"));
+        assert!(!line.contains("git:("));
+        assert!(!line.contains("±"));
         assert!(!line.contains("Cache"));
         assert!(!line.contains("5h"));
+    }
+
+    #[test]
+    fn mode_slot_matches_host_footer() {
+        let mut payload = base_payload();
+        payload.permission_mode = Some("auto".to_string());
+        payload.plan_mode = Some(true);
+        let m = metrics();
+        let items = vec!["mode".to_string()];
+        let rendered = RenderContext {
+            items: &items,
+            ..ctx(&payload, &m, None)
+        };
+        assert_eq!(render_hud(&rendered), "auto plan");
+
+        let mut payload = base_payload();
+        payload.permission_mode = Some("yolo".to_string());
+        let rendered = RenderContext {
+            items: &items,
+            ..ctx(&payload, &m, None)
+        };
+        assert_eq!(render_hud(&rendered), "yolo");
+    }
+
+    #[test]
+    fn thinking_suffix_matches_host_footer() {
+        let mut payload = base_payload();
+        payload.model = Some("kimi-k2".to_string());
+        let items = vec!["model".to_string()];
+        let mut m = metrics();
+        m.thinking_level = Some("high".to_string());
+        assert_eq!(
+            render_hud(&RenderContext { items: &items, ..ctx(&payload, &m, None) }),
+            "kimi-k2 thinking: high"
+        );
+
+        m.thinking_level = Some("on".to_string());
+        assert_eq!(
+            render_hud(&RenderContext { items: &items, ..ctx(&payload, &m, None) }),
+            "kimi-k2 thinking"
+        );
+
+        m.thinking_level = Some("off".to_string());
+        assert_eq!(
+            render_hud(&RenderContext { items: &items, ..ctx(&payload, &m, None) }),
+            "kimi-k2"
+        );
+    }
+
+    #[test]
+    fn cwd_styles_short_full_name() {
+        let mut payload = base_payload();
+        // Machine-independent path: never under HOME, 5 segments long.
+        payload.cwd = Some("/opt/dev/开发/RustProjects/kimi-code-hud-rs".to_string());
+        let m = metrics();
+        let items = vec!["cwd".to_string()];
+        let rendered = RenderContext {
+            items: &items,
+            cwd_style: CwdStyle::Name,
+            ..ctx(&payload, &m, None)
+        };
+        assert_eq!(render_hud(&rendered), "kimi-code-hud-rs");
+
+        let rendered = RenderContext {
+            cwd_style: CwdStyle::Full,
+            ..rendered
+        };
+        assert_eq!(render_hud(&rendered), "/opt/dev/开发/RustProjects/kimi-code-hud-rs");
+
+        let rendered = RenderContext {
+            cwd_style: CwdStyle::Short,
+            ..rendered
+        };
+        // 5 segments shorten to the trailing 3 with the host's …/ prefix;
+        // ≤3-segment paths keep the original leading slash, like the host.
+        assert_eq!(render_hud(&rendered), "…/开发/RustProjects/kimi-code-hud-rs");
+    }
+
+    #[test]
+    fn git_badge_matches_host_footer() {
+        let payload = base_payload();
+        let m = metrics();
+        let items = vec!["git".to_string()];
+        let dirty_no_counts = GitSummary {
+            branch: None,
+            dirty: true,
+            ..GitSummary::default()
+        };
+        let rendered = RenderContext {
+            items: &items,
+            git: dirty_no_counts,
+            ..ctx(&payload, &m, None)
+        };
+        assert_eq!(render_hud(&rendered), "main [±]");
+
+        let counted = GitSummary {
+            dirty: true,
+            diff_added: 3,
+            diff_deleted: 1,
+            ahead: 2,
+            behind: 1,
+            ..GitSummary::default()
+        };
+        let rendered = RenderContext {
+            git: counted,
+            ..rendered
+        };
+        assert_eq!(render_hud(&rendered), "main [+3 -1 ↑2↓1]");
+
+        let ahead_only = GitSummary {
+            ahead: 1,
+            ..GitSummary::default()
+        };
+        let rendered = RenderContext {
+            git: ahead_only,
+            ..rendered
+        };
+        assert_eq!(render_hud(&rendered), "main [↑1]");
+
+        // No payload branch: fall back to the probe's own parse.
+        let mut payload = base_payload();
+        payload.git_branch = None;
+        let probed = GitSummary {
+            branch: Some("dev".to_string()),
+            ..GitSummary::default()
+        };
+        let rendered = RenderContext {
+            payload: &payload,
+            git: probed,
+            ..rendered
+        };
+        assert_eq!(render_hud(&rendered), "dev");
+    }
+
+    #[test]
+    fn items_order_is_honored_and_unknown_skipped() {
+        let payload = base_payload();
+        let m = metrics();
+        let items: Vec<String> = ["git", "bogus", "model", "cwd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rendered = RenderContext {
+            items: &items,
+            ..ctx(&payload, &m, None)
+        };
+        let line = render_hud(&rendered);
+        assert_eq!(line, "main  K3  /work/kimi-code-hud");
     }
 
     #[test]

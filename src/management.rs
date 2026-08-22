@@ -1,19 +1,15 @@
-// Control plane: --install / --uninstall / --on / --off plus the
-// SessionStart self-heal hook body. The host rewrites tui.toml on some
-// upgrades (wiping [status_line]) but preserves config.toml [[hooks]], so
-// --install also registers a hook that re-points the status line at every
-// session start. Never touches a [status_line] command that is not ours —
-// the user's own status line wins.
+// Control plane: --install / --uninstall. --install registers the status
+// line in tui.toml; the host rewrites that file on some upgrades (wiping
+// [status_line]), so the user simply re-runs --install afterwards. Never
+// touches a [status_line] command that is not ours — the user's own status
+// line wins.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::toml_edit::{
-    ensure_hooks_block, inspect_status_line_command, is_own_command, remove_hooks_block,
-    remove_status_line_command, set_status_line_command, CommandValue,
-};
+use crate::toml_edit::{remove_status_line_command, set_status_line_command};
 use crate::util::{atomic_write, read_string};
 use crate::RuntimePaths;
 
@@ -21,20 +17,12 @@ use crate::RuntimePaths;
 pub struct HudConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// cwd slot style: "short" (host default) | "full" | "name".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disabled: Option<bool>,
-}
-
-fn read_hud_config(path: &Path) -> HudConfig {
-    read_string(path)
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-fn write_hud_config(path: &Path, config: &HudConfig) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(config)
-        .map_err(|err| err.to_string())?;
-    atomic_write(path, format!("{}\n", text).as_bytes()).map_err(|err| err.to_string())
+    pub cwd: Option<String>,
+    /// Status-line slot order, e.g. ["mode","model","cwd","git","speed","cache","quota"].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<String>>,
 }
 
 fn needs_quoting(path: &str) -> bool {
@@ -138,10 +126,6 @@ pub fn status_line_command(exe: &Path) -> String {
     exe_command_word(exe)
 }
 
-pub fn hook_command(exe: &Path) -> String {
-    format!("{} --sync-status-line", exe_command_word(exe))
-}
-
 fn backup_file(path: &Path) {
     // Best effort: the timestamped copy is a convenience, the atomic target
     // write below remains authoritative.
@@ -188,24 +172,8 @@ fn remove_status_line(paths: &RuntimePaths, command: &str) -> bool {
     true
 }
 
-fn install_hook(paths: &RuntimePaths, hook_cmd: &str) -> bool {
-    let content = read_or_empty(&paths.config_toml_path);
-    let next = ensure_hooks_block(&content, hook_cmd);
-    write_if_changed(&paths.config_toml_path, &content, next)
-}
-
-fn remove_hook(paths: &RuntimePaths, hook_cmd: &str) -> bool {
-    let content = read_or_empty(&paths.config_toml_path);
-    let next = remove_hooks_block(&content, hook_cmd);
-    if next == content {
-        return false;
-    }
-    backup_file(&paths.config_toml_path);
-    let _ = atomic_write(&paths.config_toml_path, next.as_bytes());
-    true
-}
-
-/// --install: register the status line and the self-heal hook.
+/// --install: register the status line in tui.toml. The host may wipe the
+/// entry on upgrades — re-run --install to restore it.
 pub fn install(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
     let (exe, copied) = installable_exe(exe, &paths.hud_dir);
     if copied {
@@ -216,97 +184,22 @@ pub fn install(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
     if install_status_line(paths, &command) {
         println!("Registered status line in {}", paths.tui_toml_path.display());
     }
-    let hook = hook_command(&exe);
-    if install_hook(paths, &hook) {
-        println!("Registered SessionStart self-heal hook in {}", paths.config_toml_path.display());
-    }
     Ok(())
 }
 
-/// --uninstall: remove both, with backups.
+/// --uninstall: remove the status line, with a backup.
 pub fn uninstall(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
     let command = status_line_command(exe);
     if remove_status_line(paths, &command) {
         println!("Removed status line from {}", paths.tui_toml_path.display());
     }
-    let hook = hook_command(exe);
-    if remove_hook(paths, &hook) {
-        println!("Removed SessionStart hook from {}", paths.config_toml_path.display());
-    }
     Ok(())
-}
-
-/// --off: reversible switch. Sets the disabled flag (the hook stays dormant)
-/// and strips the status-line command.
-pub fn disable(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
-    let mut config = read_hud_config(&paths.hud_config_path);
-    if config.disabled != Some(true) {
-        config.disabled = Some(true);
-        write_hud_config(&paths.hud_config_path, &config)?;
-    }
-    let command = status_line_command(exe);
-    if remove_status_line(paths, &command) {
-        println!("Removed status line from {}", paths.tui_toml_path.display());
-    }
-    println!("HUD disabled (self-heal hook dormant; --on re-enables)");
-    Ok(())
-}
-
-/// --on: clear the flag, write the command back, ensure the hook.
-pub fn enable(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
-    let (exe, copied) = installable_exe(exe, &paths.hud_dir);
-    if copied {
-        println!("Copied executable to {} (the build path contains spaces)", exe.display());
-    }
-    let mut config = read_hud_config(&paths.hud_config_path);
-    if config.disabled.is_some() {
-        config.disabled = None;
-        write_hud_config(&paths.hud_config_path, &config)?;
-    }
-    let command = status_line_command(&exe);
-    if install_status_line(paths, &command) {
-        println!("Registered status line in {}", paths.tui_toml_path.display());
-    }
-    let hook = hook_command(&exe);
-    if install_hook(paths, &hook) {
-        println!("Registered SessionStart self-heal hook in {}", paths.config_toml_path.display());
-    }
-    Ok(())
-}
-
-/// SessionStart hook body (--sync-status-line): repair the tui.toml entry if
-/// it is absent or ours. Stays silent while disabled, never overwrites a
-/// foreign command, always exits 0.
-pub fn sync_status_line(exe: &Path, paths: &RuntimePaths) {
-    let result = std::panic::catch_unwind(|| sync_status_line_inner(exe, paths));
-    drop(result);
-}
-
-fn sync_status_line_inner(exe: &Path, paths: &RuntimePaths) {
-    // --off switch: honor the flag before touching anything.
-    if read_hud_config(&paths.hud_config_path).disabled == Some(true) {
-        return;
-    }
-    // The hook itself usually runs from the space-free copy, so this keeps
-    // pointing tui.toml at it; the copy's content is refreshed by re-running
-    // --install after a rebuild.
-    let (exe, _copied) = installable_exe(exe, &paths.hud_dir);
-    let content = read_or_empty(&paths.tui_toml_path);
-    match inspect_status_line_command(&content) {
-        CommandValue::Unknown => return,
-        CommandValue::Parsed(value) if !is_own_command(&value) => return,
-        _ => {}
-    }
-    let next = set_status_line_command(&content, &status_line_command(&exe));
-    if next != content && next != content.replace("\r\n", "\n") {
-        let _ = atomic_write(&paths.tui_toml_path, next.as_bytes());
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::toml_edit::{get_status_line_command, set_status_line_command};
+    use crate::toml_edit::{get_status_line_command, is_own_command, set_status_line_command};
 
     #[test]
     fn bare_paths_stay_bare() {
@@ -351,17 +244,7 @@ mod tests {
             let toml = set_status_line_command("", &command);
             let decoded = get_status_line_command(&toml).expect(exe);
             assert_eq!(decoded, command, "TOML roundtrip must be lossless");
-            assert!(is_own_command(&decoded), "hook must recognize its own command: {}", decoded);
+            assert!(is_own_command(&decoded), "removal must recognize its own command: {}", decoded);
         }
-    }
-
-    #[test]
-    fn hook_command_roundtrip() {
-        let hook = hook_command(Path::new("C:\\Program Files\\hud\\kimi-code-hud-rs.exe"));
-        assert!(hook.ends_with("--sync-status-line"));
-        // safe_command_words must reassemble the quoted exe into one word.
-        let words = crate::toml_edit::safe_command_words(&hook).unwrap();
-        assert_eq!(words[0], "C:\\Program Files\\hud\\kimi-code-hud-rs.exe");
-        assert_eq!(words[1], "--sync-status-line");
     }
 }

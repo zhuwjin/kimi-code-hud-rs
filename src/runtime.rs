@@ -5,14 +5,14 @@
 
 use std::time::{Duration, Instant};
 
-use crate::git_status;
+use crate::git_status::{self, GitSummary};
 use crate::management::HudConfig;
 use crate::metrics;
 use crate::model_config::{resolve_model_provider, MANAGED_KIMI_PROVIDER};
 use crate::paths::RuntimePaths;
 use crate::payload::read_stdin_payload;
 use crate::quota;
-use crate::render::{render_hud, RenderContext};
+use crate::render::{render_hud, CwdStyle, RenderContext, DEFAULT_ITEMS};
 use crate::theme::resolve_theme;
 use crate::thinking::resolve_thinking_level;
 use crate::util;
@@ -35,6 +35,35 @@ fn layout_from(env_layout: Option<&str>, hud_config: &HudConfig) -> String {
         .filter(|l| *l == "compact" || *l == "normal")
         .unwrap_or("normal")
         .to_string()
+}
+
+/// Env `KIMI_HUD_RS_CWD` > config `cwd` > the host footer's short style.
+fn cwd_style_from(env_cwd: Option<&str>, hud_config: &HudConfig) -> CwdStyle {
+    CwdStyle::parse(env_cwd)
+        .or_else(|| CwdStyle::parse(hud_config.cwd.as_deref()))
+        .unwrap_or_default()
+}
+
+/// Env `KIMI_HUD_RS_ITEMS` (comma-separated) > config `items` > the default
+/// host-footer order plus the HUD extras. Unknown names are kept — render
+/// skips them — so a typo never blanks a slot.
+fn items_from(env_items: Option<&str>, hud_config: &HudConfig) -> Vec<String> {
+    if let Some(raw) = env_items.map(str::trim).filter(|s| !s.is_empty()) {
+        let items: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !items.is_empty() {
+            return items;
+        }
+    }
+    hud_config
+        .items
+        .as_ref()
+        .filter(|items| !items.is_empty())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect())
 }
 
 fn color_from_env(no_color: bool, hud_no_color: bool) -> bool {
@@ -99,17 +128,17 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
     // effort, the level is only inferred from config.toml and renders muted.
     summary.thinking_provisional = !thinking.confirmed;
 
-    let mut git_dirty = false;
+    let mut git = GitSummary::default();
     if payload.git_branch.is_some() && remaining_ms(deadline) >= GIT_MIN_REMAINING_MS {
-        let budget = remaining_ms(deadline).saturating_sub(2).max(1);
-        git_dirty = git_status::is_git_dirty(
+        git = git_status::git_status(
             payload.cwd.as_deref().unwrap_or(""),
-            Duration::from_millis(budget),
             &paths.git_cache_path,
         );
     }
 
     let layout = layout_from(std::env::var("KIMI_HUD_RS_LAYOUT").ok().as_deref(), &hud_config);
+    let cwd_style = cwd_style_from(std::env::var("KIMI_HUD_RS_CWD").ok().as_deref(), &hud_config);
+    let items = items_from(std::env::var("KIMI_HUD_RS_ITEMS").ok().as_deref(), &hud_config);
     let color = color_from_env(
         std::env::var_os("NO_COLOR").is_some(),
         std::env::var_os("KIMI_HUD_RS_NO_COLOR").is_some(),
@@ -123,7 +152,9 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         payload: &payload,
         quota: quota_view.as_ref(),
         metrics: &summary,
-        git_dirty,
+        git,
+        items: &items,
+        cwd_style,
         layout: &layout,
         color,
         theme,

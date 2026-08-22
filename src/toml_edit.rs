@@ -1,14 +1,11 @@
-// Minimal line-oriented rewriting of the host's tui.toml and config.toml for
-// --install / --uninstall / --on / --off. This is NOT a general TOML parser:
-// it locates the [status_line] section (or the managed hook block) and adds,
-// replaces or removes only its own lines, preserving everything else
-// (including `items` and unrelated hooks) byte-for-byte modulo CRLF
-// normalization.
+// Minimal line-oriented rewriting of the host's tui.toml for
+// --install / --uninstall. This is NOT a general TOML parser: it locates
+// the [status_line] section and adds, replaces or removes only its own
+// lines, preserving everything else (including `items`) byte-for-byte
+// modulo CRLF normalization.
 
 pub const EXE_BASENAME: &str = "kimi-code-hud-rs";
 
-const HOOKS_START: &str = "# --- kimi-code-hud-rs hooks START (managed, do not edit) ---";
-const HOOKS_END: &str = "# --- kimi-code-hud-rs hooks END ---";
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CommandValue {
@@ -102,8 +99,8 @@ fn command_value_from_line(line: &str) -> CommandValue {
     CommandValue::Unknown
 }
 
-/// Inspect [status_line].command. Unknown syntax is intentionally
-/// fail-closed so the self-heal hook never overwrites user configuration.
+/// Inspect [status_line].command. Unknown syntax is intentionally fail-closed
+/// so install/removal never overwrites user configuration.
 pub fn inspect_status_line_command(content: &str) -> CommandValue {
     let lines = normalize(content);
     let Some((start, end)) = find_section(&lines, "status_line") else {
@@ -323,232 +320,6 @@ pub fn remove_status_line_command(content: &str, command: &str) -> String {
     out.join("\n")
 }
 
-fn hook_block_lines(hook_command: &str) -> Vec<String> {
-    vec![
-        HOOKS_START.to_string(),
-        "[[hooks]]".to_string(),
-        "event = \"SessionStart\"".to_string(),
-        format!("command = \"{}\"", toml_escape(hook_command)),
-        "timeout = 5".to_string(),
-        HOOKS_END.to_string(),
-    ]
-}
-
-/// (start, Some(end)) of the managed marker pair; a dangling START marker has
-/// no END and must leave the file untouched.
-fn find_block(lines: &[String]) -> Option<(usize, Option<usize>)> {
-    let start = lines.iter().position(|l| l.trim() == HOOKS_START)?;
-    for (i, l) in lines.iter().enumerate().skip(start + 1) {
-        if l.trim() == HOOKS_END {
-            return Some((start, Some(i)));
-        }
-    }
-    Some((start, None))
-}
-
-fn hook_path_from_command(hook_command: &str) -> Option<String> {
-    let t = hook_command.trim();
-    let stripped = t.strip_prefix("node").filter(|r| r.starts_with(char::is_whitespace));
-    let path = stripped.map(str::trim).unwrap_or(t);
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
-}
-
-/// Bare [[hooks]] blocks (written before the marker convention) registering
-/// our SessionStart hook. A block spans its [[hooks]] header to the next
-/// table header; it matches when it sets event = "SessionStart" and a command
-/// containing the hook path.
-fn find_bare_blocks(
-    lines: &[String],
-    hook_path: Option<&str>,
-    exclude: Option<(usize, usize)>,
-) -> Vec<(usize, usize)> {
-    let Some(hook_path) = hook_path else {
-        return Vec::new();
-    };
-    let escaped_path = hook_path.replace('\\', "\\\\");
-    let mut ranges = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if let Some((ex_start, ex_end)) = exclude {
-            if i >= ex_start && i <= ex_end {
-                i = ex_end + 1;
-                continue;
-            }
-        }
-        if lines[i].trim() != "[[hooks]]" {
-            i += 1;
-            continue;
-        }
-        let mut end = lines.len();
-        for (j, l) in lines.iter().enumerate().skip(i + 1) {
-            if let Some((ex_start, _)) = exclude {
-                if j == ex_start {
-                    end = j;
-                    break;
-                }
-            }
-            if l.trim().starts_with('[') {
-                end = j;
-                break;
-            }
-        }
-        let mut has_event = false;
-        let mut has_command = false;
-        for l in &lines[i + 1..end] {
-            let t = l.trim();
-            if t == "event = \"SessionStart\"" {
-                has_event = true;
-            }
-            if t.starts_with("command = \"")
-                && (t.contains(hook_path) || t.contains(&escaped_path))
-            {
-                has_command = true;
-            }
-        }
-        if has_event && has_command {
-            let mut last = end.saturating_sub(1);
-            while last > i && lines[last].trim().is_empty() {
-                last -= 1;
-            }
-            ranges.push((i, last));
-        }
-        i = end.max(i + 1);
-    }
-    ranges
-}
-
-fn collapse_blanks_at(lines: &mut Vec<String>, i: usize) {
-    let mut lo = i.min(lines.len());
-    while lo > 0 && lines[lo - 1].trim().is_empty() {
-        lo -= 1;
-    }
-    let mut hi = i.min(lines.len());
-    while hi < lines.len() && lines[hi].trim().is_empty() {
-        hi += 1;
-    }
-    let count = hi.saturating_sub(lo);
-    if lo == 0 {
-        lines.drain(0..count);
-    } else if count > 1 {
-        lines.drain(lo + 1..hi);
-    }
-}
-
-struct RangeEdit {
-    start: usize,
-    end: usize,
-    replacement: Option<Vec<String>>,
-}
-
-fn apply_ranges(lines: &mut Vec<String>, ranges: Vec<RangeEdit>) {
-    let mut sorted = ranges;
-    sorted.sort_by(|a, b| b.start.cmp(&a.start));
-    for range in sorted {
-        let is_delete = range.replacement.is_none();
-        let replacement = range.replacement.unwrap_or_default();
-        let at = range.start.min(lines.len());
-        let end = range.end.min(lines.len());
-        lines.splice(at..=end, replacement);
-        if is_delete {
-            collapse_blanks_at(lines, at);
-        }
-    }
-}
-
-/// config.toml content with our SessionStart hook block present. Idempotent;
-/// refreshes the block in place when the hook path moved. Legacy unmarked
-/// [[hooks]] blocks are adopted (first upgraded, the rest removed).
-pub fn ensure_hooks_block(content: &str, hook_command: &str) -> String {
-    let mut lines = normalize(content);
-    while matches!(lines.last(), Some(l) if l.trim().is_empty()) {
-        lines.pop();
-    }
-    let block = hook_block_lines(hook_command);
-    let found = find_block(&lines);
-    if let Some((_, None)) = found {
-        return content.to_string();
-    }
-    let bare = find_bare_blocks(
-        &lines,
-        hook_path_from_command(hook_command).as_deref(),
-        found.map(|(s, e)| (s, e.unwrap())),
-    );
-    let mut ranges: Vec<RangeEdit> = Vec::new();
-    match found {
-        Some((start, Some(end))) => {
-            ranges.push(RangeEdit { start, end, replacement: Some(block.clone()) });
-            for (s, e) in bare {
-                ranges.push(RangeEdit { start: s, end: e, replacement: None });
-            }
-        }
-        None => {
-            if let Some((first, rest)) = bare.split_first() {
-                ranges.push(RangeEdit {
-                    start: first.0,
-                    end: first.1,
-                    replacement: Some(block.clone()),
-                });
-                for (s, e) in rest {
-                    ranges.push(RangeEdit { start: *s, end: *e, replacement: None });
-                }
-            } else {
-                if !lines.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.extend(block);
-            }
-        }
-        Some((_, None)) => unreachable!(),
-    }
-    apply_ranges(&mut lines, ranges);
-    while matches!(lines.last(), Some(l) if l.trim().is_empty()) {
-        lines.pop();
-    }
-    let out = format!("{}\n", lines.join("\n"));
-    let normalized = content.replace("\r\n", "\n");
-    if out == normalized {
-        content.to_string()
-    } else {
-        out
-    }
-}
-
-/// config.toml content with our hook block (and legacy bare blocks) removed.
-pub fn remove_hooks_block(content: &str, hook_command: &str) -> String {
-    let mut lines = normalize(content);
-    let found = find_block(&lines);
-    if let Some((_, None)) = found {
-        return content.to_string();
-    }
-    let mut ranges: Vec<RangeEdit> = Vec::new();
-    if let Some((start, Some(end))) = found {
-        ranges.push(RangeEdit { start, end, replacement: None });
-    }
-    for (s, e) in find_bare_blocks(
-        &lines,
-        hook_path_from_command(hook_command).as_deref(),
-        found.map(|(s, e)| (s, e.unwrap())),
-    ) {
-        ranges.push(RangeEdit { start: s, end: e, replacement: None });
-    }
-    if ranges.is_empty() {
-        return content.to_string();
-    }
-    apply_ranges(&mut lines, ranges);
-    while matches!(lines.last(), Some(l) if l.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", lines.join("\n"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,24 +392,4 @@ mod tests {
         assert!(!is_own_command("/opt/bin/some-other-tool"));
     }
 
-    #[test]
-    fn hooks_block_roundtrip() {
-        let hook = "\"/opt/bin/kimi-code-hud-rs\" --sync-status-line";
-        let base = "model = \"k3\"\n\n[[hooks]]\nevent = \"UserPromptSubmit\"\ncommand = \"echo hi\"\n";
-        let next = ensure_hooks_block(base, hook);
-        assert!(next.contains(HOOKS_START));
-        assert!(next.contains("event = \"SessionStart\""));
-        assert!(next.contains("UserPromptSubmit"));
-        assert_eq!(ensure_hooks_block(&next, hook), next);
-        let removed = remove_hooks_block(&next, hook);
-        assert!(!removed.contains(HOOKS_START));
-        assert!(removed.contains("UserPromptSubmit"));
-    }
-
-    #[test]
-    fn hooks_block_dangling_start_is_untouched() {
-        let broken = format!("{}\n[[hooks]]\n", HOOKS_START);
-        assert_eq!(ensure_hooks_block(&broken, "x"), broken);
-        assert_eq!(remove_hooks_block(&broken, "x"), broken);
-    }
 }
