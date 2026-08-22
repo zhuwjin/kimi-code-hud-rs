@@ -15,11 +15,6 @@ use crate::util;
 #[derive(Debug, Clone)]
 pub struct ThinkingResolution {
     pub level: String,
-    /// True when the level came from the wire journal (or a snapshot pinned
-    /// from it). False while only inferred from config.toml — kimi-code
-    /// lazy-starts, so the suffix renders muted until the first turn's wire
-    /// rows confirm the actual effort.
-    pub confirmed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,8 +22,6 @@ struct Snapshot {
     level: String,
     #[serde(default)]
     model: Option<String>,
-    #[serde(default)]
-    confirmed: bool,
 }
 
 fn snapshot_path(snapshot_dir: &Path, session_id: &str) -> std::path::PathBuf {
@@ -41,11 +34,10 @@ fn read_snapshot(snapshot_dir: &Path, session_id: &str) -> Option<Snapshot> {
     (!snap.level.is_empty()).then_some(snap)
 }
 
-fn write_snapshot(snapshot_dir: &Path, session_id: &str, level: &str, model: &str, confirmed: bool) {
+fn write_snapshot(snapshot_dir: &Path, session_id: &str, level: &str, model: &str) {
     let snap = Snapshot {
         level: level.to_string(),
         model: Some(model.to_string()),
-        confirmed,
     };
     if let Ok(text) = serde_json::to_string(&snap) {
         let _ = util::atomic_write(&snapshot_path(snapshot_dir, session_id), text.as_bytes());
@@ -112,22 +104,22 @@ pub fn resolve_thinking_level(
 ) -> ThinkingResolution {
     if let Some(level) = session_level.filter(|l| !l.is_empty()) {
         if let Some(session_id) = session_id {
-            write_snapshot(snapshot_dir, session_id, level, model, true);
+            write_snapshot(snapshot_dir, session_id, level, model);
         }
-        return ThinkingResolution { level: level.to_string(), confirmed: true };
+        return ThinkingResolution { level: level.to_string() };
     }
     if let Some(session_id) = session_id {
         if let Some(snap) = read_snapshot(snapshot_dir, session_id) {
             if snap.model.as_deref() == Some(model) {
-                return ThinkingResolution { level: snap.level, confirmed: snap.confirmed };
+                return ThinkingResolution { level: snap.level };
             }
         }
     }
     let level = resolve_from_config(model, config_text);
     if let Some(session_id) = session_id {
-        write_snapshot(snapshot_dir, session_id, &level, model, false);
+        write_snapshot(snapshot_dir, session_id, &level, model);
     }
-    ThinkingResolution { level, confirmed: false }
+    ThinkingResolution { level }
 }
 
 #[cfg(test)]
@@ -160,21 +152,18 @@ default_effort = "high"
         let dir = temp_dir("wire");
         let res = resolve_thinking_level(Some("max"), "K3", Some("sess1"), &dir, CONFIG);
         assert_eq!(res.level, "max");
-        assert!(res.confirmed);
-        // Later frames with no wire level read the confirmed snapshot.
+        // Later frames with no wire level read the pinned snapshot.
         let res = resolve_thinking_level(None, "K3", Some("sess1"), &dir, CONFIG);
         assert_eq!(res.level, "max");
-        assert!(res.confirmed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn config_fallback_is_provisional_then_pinned() {
+    fn config_fallback_pins_snapshot() {
         let dir = temp_dir("config");
         let res = resolve_thinking_level(None, "K3", Some("sess2"), &dir, CONFIG);
         // global effort wins over the model default.
         assert_eq!(res.level, "medium");
-        assert!(!res.confirmed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

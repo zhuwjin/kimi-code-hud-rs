@@ -12,7 +12,7 @@ use crate::model_config::{resolve_model_provider, MANAGED_KIMI_PROVIDER};
 use crate::paths::RuntimePaths;
 use crate::payload::read_stdin_payload;
 use crate::quota;
-use crate::render::{render_hud, CwdStyle, RenderContext, DEFAULT_ITEMS};
+use crate::render::{render_hud, resolve_slots, CwdStyle, RenderContext, DEFAULT_ITEMS};
 use crate::theme::resolve_theme;
 use crate::thinking::resolve_thinking_level;
 use crate::util;
@@ -37,11 +37,14 @@ fn layout_from(env_layout: Option<&str>, hud_config: &HudConfig) -> String {
         .to_string()
 }
 
-/// Env `KIMI_HUD_RS_CWD` > config `cwd` > the host footer's short style.
-fn cwd_style_from(env_cwd: Option<&str>, hud_config: &HudConfig) -> CwdStyle {
-    CwdStyle::parse(env_cwd)
-        .or_else(|| CwdStyle::parse(hud_config.cwd.as_deref()))
-        .unwrap_or_default()
+/// Env `KIMI_HUD_RS_CWD` wins for both layouts (compact derives the
+/// next-shorter form); otherwise the slots-resolved pair applies.
+fn cwd_pair_from(env_cwd: Option<&str>, resolved: &crate::render::ResolvedSlots) -> (CwdStyle, CwdStyle) {
+    if let Some(style) = CwdStyle::parse(env_cwd) {
+        (style, style.compact_fallback())
+    } else {
+        (resolved.cwd_normal, resolved.cwd_compact)
+    }
 }
 
 /// Env `KIMI_HUD_RS_ITEMS` (comma-separated) > config `items` > the default
@@ -81,8 +84,9 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
     };
 
     // One shared config snapshot per frame: every source read at most once.
+    // config.json is parsed as JSONC — comments and trailing commas allowed.
     let hud_config: HudConfig = util::read_string(&paths.hud_config_path)
-        .and_then(|text| serde_json::from_str(&text).ok())
+        .and_then(|text| serde_json::from_str(&util::strip_jsonc(&text)).ok())
         .unwrap_or_default();
     let config_toml = util::read_string(&paths.config_toml_path).unwrap_or_default();
     let tui_toml = util::read_string(&paths.tui_toml_path).unwrap_or_default();
@@ -124,9 +128,6 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         &config_toml,
     );
     summary.thinking_level = Some(thinking.level);
-    // kimi-code lazy-starts: until the first turn's wire rows confirm the
-    // effort, the level is only inferred from config.toml and renders muted.
-    summary.thinking_provisional = !thinking.confirmed;
 
     let mut git = GitSummary::default();
     if payload.git_branch.is_some() && remaining_ms(deadline) >= GIT_MIN_REMAINING_MS {
@@ -137,7 +138,10 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
     }
 
     let layout = layout_from(std::env::var("KIMI_HUD_RS_LAYOUT").ok().as_deref(), &hud_config);
-    let cwd_style = cwd_style_from(std::env::var("KIMI_HUD_RS_CWD").ok().as_deref(), &hud_config);
+    let resolved = resolve_slots(hud_config.slots.as_ref(), layout == "compact");
+    let (cwd_style, cwd_compact) = cwd_pair_from(std::env::var("KIMI_HUD_RS_CWD").ok().as_deref(), &resolved);
+    let styles = resolved.styles;
+    let formats = resolved.formats;
     let items = items_from(std::env::var("KIMI_HUD_RS_ITEMS").ok().as_deref(), &hud_config);
     let color = color_from_env(
         std::env::var_os("NO_COLOR").is_some(),
@@ -155,6 +159,9 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         git,
         items: &items,
         cwd_style,
+        cwd_compact,
+        styles: &styles,
+        formats: &formats,
         layout: &layout,
         color,
         theme,

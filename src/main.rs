@@ -33,8 +33,12 @@ Usage:
 The host may wipe the [status_line] entry on kimi-code upgrades — when the
 HUD disappears, simply re-run --install and restart the session (/reload-tui).
 
-Config: ~/.kimi-code-hud-rs/config.json
-        {"layout":"compact|normal", "cwd":"short|full|name", "items":["mode","model","cwd","git","speed","cache","quota"]}
+Config: ~/.kimi-code-hud-rs/config.json (JSONC — comments and trailing commas allowed)
+        {"layout":..., "items":[...],
+         "slots": {"<slot>": {"color":"<token|#hex>","bold":bool,"format":"...",
+                              "normal":{...}, "compact":{...}}}}
+        format: long|short (git/speed/cache/quota) or short|full|name (cwd).
+        Mode badges style individually as "auto"/"yolo"/"plan"/"swarm".
 Env:    KIMI_HUD_RS_LAYOUT / KIMI_HUD_RS_CWD / KIMI_HUD_RS_ITEMS override the config;
         NO_COLOR / KIMI_HUD_RS_NO_COLOR disable colors.
         KIMI_HUD_RS_THEME=dark|light pins the badge palette (default: tui.toml's

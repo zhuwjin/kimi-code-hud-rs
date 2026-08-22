@@ -17,12 +17,13 @@ use crate::RuntimePaths;
 pub struct HudConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
-    /// cwd slot style: "short" (host default) | "full" | "name".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
     /// Status-line slot order, e.g. ["mode","model","cwd","git","speed","cache","quota"].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<String>>,
+    /// Per-slot config: style and format overrides, keyed by slot name
+    /// (the mode badges style individually as "auto"/"yolo"/"plan"/"swarm").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slots: Option<std::collections::HashMap<String, crate::render::SlotConfig>>,
 }
 
 fn needs_quoting(path: &str) -> bool {
@@ -126,22 +127,72 @@ pub fn status_line_command(exe: &Path) -> String {
     exe_command_word(exe)
 }
 
-/// Create config.json with explicit defaults when it does not exist yet, so
-/// the file is discoverable right after --install. An existing file is never
+/// The default config file, written as JSONC so every option is documented
+/// inline. `styles` keys are the slot names from `items`.
+const DEFAULT_CONFIG_JSONC: &str = r##"{
+  // Layout: "normal" | "compact" — compact is also the fallback when the
+  // rendered line exceeds 200 visible characters.
+  "layout": "normal",
+
+  // Slot order; unknown names are ignored.
+  "items": ["mode", "model", "cwd", "git", "speed", "cache", "quota"],
+
+  // Per-slot overrides, keyed by slot name. Flat fields apply to both
+  // layouts; the nested "normal" / "compact" objects override them for
+  // that layout, field by field. "color": theme token (text / text_dim /
+  // text_muted / primary / warning / accent / default) or "#RRGGBB";
+  // "bold": true | false; "format" per slot — long | short for
+  // git/speed/cache/quota (short forms: git "main*", speed "⚡ 47", cache
+  // "C 92%", quota without bars), short | full | name for cwd.
+  //
+  // The values below ARE the built-in defaults — edit in place. Note:
+  // speed / cache / quota colors are deliberately unset; setting one
+  // colors the whole segment and replaces the built-in threshold colors
+  // and stale muting. The mode badges style individually.
+  "slots": {
+    "auto":  { "color": "warning", "bold": true },
+    "yolo":  { "color": "warning", "bold": true },
+    "plan":  { "color": "primary", "bold": true },
+    "swarm": { "color": "accent",  "bold": true },
+
+    "model": { "color": "text" },
+    // cwd format: "short" (host-like abbreviation), "full" (~-abbreviated
+    // full path; "long" aliases it) or "name" (last component).
+    "cwd":   {
+      "color": "text_dim",
+      "normal":  { "format": "short" },
+      "compact": { "format": "name" }
+    },
+    "git":   {
+      "color": "text_dim",
+      "normal":  { "format": "long" },
+      "compact": { "format": "short" }
+    },
+    "speed": {
+      "normal":  { "format": "long" },
+      "compact": { "format": "short" }
+    },
+    "cache": {
+      "normal":  { "format": "long" },
+      "compact": { "format": "short" }
+    },
+    "quota": {
+      "normal":  { "format": "long" },
+      "compact": { "format": "short" }
+    }
+  }
+}
+"##;
+
+/// Create config.json with documented defaults when it does not exist yet,
+/// so the file is discoverable right after --install. The file is parsed as
+/// JSONC (comments and trailing commas allowed). An existing file is never
 /// touched — even an unparseable one may hold user edits.
 fn ensure_default_config(config_path: &Path) -> bool {
     if config_path.exists() {
         return false;
     }
-    let config = HudConfig {
-        layout: Some("normal".to_string()),
-        cwd: Some("short".to_string()),
-        items: Some(crate::render::DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect()),
-    };
-    match serde_json::to_string_pretty(&config) {
-        Ok(text) => atomic_write(config_path, format!("{}\n", text).as_bytes()).is_ok(),
-        Err(_) => false,
-    }
+    atomic_write(config_path, DEFAULT_CONFIG_JSONC.as_bytes()).is_ok()
 }
 
 fn backup_file(path: &Path) {
@@ -230,8 +281,45 @@ mod tests {
         assert!(ensure_default_config(&path));
         let created = fs::read_to_string(&path).unwrap();
         assert!(created.contains("\"layout\": \"normal\""));
-        assert!(created.contains("\"cwd\": \"short\""));
+
         assert!(created.contains("\"items\""));
+        // Documented JSONC: comments inline, and parseable after stripping.
+        assert!(created.contains("//"));
+        let parsed: HudConfig =
+            serde_json::from_str(&crate::util::strip_jsonc(&created)).unwrap();
+        assert_eq!(parsed.layout.as_deref(), Some("normal"));
+        let expected: Vec<String> = crate::render::DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(parsed.items, Some(expected));
+        // Full schema present: the slots map is pre-filled with the
+        // built-in defaults and resolves to identical output.
+        let slots = parsed.slots.expect("slots pre-filled");
+        assert_eq!(slots.len(), 10);
+        let resolved_normal = crate::render::resolve_slots(Some(&slots), false);
+        let resolved_compact = crate::render::resolve_slots(Some(&slots), true);
+        // cwd: text_dim token, short form; no long/short format; compact derives name.
+        assert_eq!(
+            resolved_normal.styles.get("cwd"),
+            Some(&crate::render::SegmentStyle {
+                color: Some(crate::render::ResolvedColor::Token(
+                    crate::render::StyleToken::TextDim
+                )),
+                bold: None,
+            })
+        );
+        assert!(resolved_normal.formats.get("cwd").is_none());
+        assert_eq!(resolved_normal.cwd_normal, crate::render::CwdStyle::Short);
+        assert_eq!(resolved_compact.cwd_compact, crate::render::CwdStyle::Name);
+        assert_eq!(
+            resolved_normal.styles.get("git"),
+            Some(&crate::render::SegmentStyle {
+                color: Some(crate::render::ResolvedColor::Token(
+                    crate::render::StyleToken::TextDim
+                )),
+                bold: None,
+            })
+        );
+        assert_eq!(resolved_normal.formats.get("git"), Some(&crate::render::SegmentFormat::Long));
+        assert_eq!(resolved_compact.formats.get("git"), Some(&crate::render::SegmentFormat::Short));
         // Already present: never rewritten, user edits survive.
         fs::write(&path, "{\"layout\": \"compact\"}").unwrap();
         assert!(!ensure_default_config(&path));

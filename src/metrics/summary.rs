@@ -29,7 +29,6 @@ pub struct MetricsSummary {
     pub cache: Option<CacheMetric>,
     pub model_alias: Option<String>,
     pub thinking_level: Option<String>,
-    pub thinking_provisional: bool,
     pub turn_started_at: Option<i64>,
     pub compacting_since: Option<i64>,
     pub compaction_ms: Option<i64>,

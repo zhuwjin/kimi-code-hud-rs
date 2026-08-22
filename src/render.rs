@@ -5,6 +5,8 @@
 // Slot order is configurable via config.json `items`. Degrades
 // normal -> compact when the line exceeds 200 visible chars.
 
+use serde::{Deserialize, Serialize};
+
 use crate::git_status::GitSummary;
 use crate::metrics::MetricsSummary;
 use crate::payload::Payload;
@@ -36,9 +38,19 @@ impl CwdStyle {
     pub fn parse(value: Option<&str>) -> Option<CwdStyle> {
         match value {
             Some("short") => Some(CwdStyle::Short),
-            Some("full") => Some(CwdStyle::Full),
+            // "long" aliases "full" so the shared `format` field reads uniformly.
+            Some("full") | Some("long") => Some(CwdStyle::Full),
             Some("name") => Some(CwdStyle::Name),
             _ => None,
+        }
+    }
+
+    /// The next-shorter style the compact layout derives when nothing pins
+    /// it explicitly.
+    pub fn compact_fallback(self) -> CwdStyle {
+        match self {
+            CwdStyle::Full => CwdStyle::Short,
+            CwdStyle::Short | CwdStyle::Name => CwdStyle::Name,
         }
     }
 }
@@ -72,9 +84,9 @@ fn dark_palette() -> Palette {
         text: rgb(224, 224, 224),      // #E0E0E0 — model label
         text_dim: rgb(136, 136, 136),  // #888888 — cwd / git badge
         text_muted: rgb(107, 107, 107), // #6B6B6B — provisional readings
-        warning: bold(rgb(232, 168, 56)),  // #E8A838 — auto/yolo badges
-        primary: bold(rgb(79, 168, 255)),  // #4FA8FF — plan badge
-        accent: bold(rgb(91, 192, 190)),   // #5BC0BE — swarm badge
+        warning: rgb(232, 168, 56),  // #E8A838 — auto/yolo badges (bold at call site)
+        primary: rgb(79, 168, 255),  // #4FA8FF — plan badge
+        accent: rgb(91, 192, 190),   // #5BC0BE — swarm badge
         bar_red: "\x1b[31m".to_string(),
         bar_yellow: "\x1b[33m".to_string(),
         bar_green: "\x1b[32m".to_string(),
@@ -86,9 +98,9 @@ fn light_palette() -> Palette {
         text: rgb(26, 26, 26),         // #1A1A1A
         text_dim: rgb(69, 69, 69),     // #454545
         text_muted: rgb(95, 95, 95),   // #5F5F5F
-        warning: bold(rgb(146, 102, 10)),  // #92660A
-        primary: bold(rgb(21, 101, 192)),  // #1565C0
-        accent: bold(rgb(0, 131, 143)),    // #00838F
+        warning: rgb(146, 102, 10),  // #92660A
+        primary: rgb(21, 101, 192),  // #1565C0
+        accent: rgb(0, 131, 143),    // #00838F
         bar_red: rgb(185, 28, 28),   // #B91C1C — host light error
         bar_yellow: rgb(146, 102, 10), // #92660A — host light warning
         bar_green: rgb(14, 122, 56),  // #0E7A38 — host light success
@@ -100,6 +112,197 @@ fn palette_for(theme: Theme) -> Palette {
         Theme::Dark => dark_palette(),
         Theme::Light => light_palette(),
     }
+}
+
+/// One slot's config as written in config.json's "slots" map. The flat
+/// fields apply to both layouts; the nested "normal" / "compact" objects
+/// override them for that layout, field by field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SlotConfig {
+    /// Theme token ("text" | "text_dim" | "text_muted" | "primary" |
+    /// "warning" | "accent" | "default") or a hex value like "#FF8800".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    /// "long" | "short".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<SlotOverrides>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact: Option<SlotOverrides>,
+}
+
+/// Layout-specific overrides inside a SlotConfig; same fields, no nesting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SlotOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+/// A theme token a style override can reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleToken {
+    Text,
+    TextDim,
+    TextMuted,
+    Primary,
+    Warning,
+    Accent,
+    /// No color — plain terminal foreground.
+    Default,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedColor {
+    Token(StyleToken),
+    Hex(u8, u8, u8),
+}
+
+/// Field-wise style for one slot; `None` fields fall through to the next
+/// precedence level (styles_compact/styles_normal > styles > built-in).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SegmentStyle {
+    pub color: Option<ResolvedColor>,
+    pub bold: Option<bool>,
+}
+
+/// A slot's text format: the long form (normal layout's default) or the
+/// short form (compact layout's default). Explicit config wins over the
+/// layout default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentFormat {
+    Long,
+    Short,
+}
+
+pub fn parse_format(value: &str) -> Option<SegmentFormat> {
+    match value {
+        "long" => Some(SegmentFormat::Long),
+        "short" => Some(SegmentFormat::Short),
+        _ => None,
+    }
+}
+
+fn parse_style_color(value: &str) -> Option<ResolvedColor> {
+    let token = match value {
+        "text" => StyleToken::Text,
+        "text_dim" => StyleToken::TextDim,
+        "text_muted" => StyleToken::TextMuted,
+        "primary" => StyleToken::Primary,
+        "warning" => StyleToken::Warning,
+        "accent" => StyleToken::Accent,
+        "default" => StyleToken::Default,
+        _ => {
+            let hex = value.strip_prefix('#')?;
+            if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let byte = |r: std::ops::Range<usize>| u8::from_str_radix(&hex[r], 16).ok();
+            return Some(ResolvedColor::Hex(byte(0..2)?, byte(2..4)?, byte(4..6)?));
+        }
+    };
+    Some(ResolvedColor::Token(token))
+}
+
+fn token_sgr(palette: &Palette, token: StyleToken) -> String {
+    match token {
+        StyleToken::Text => palette.text.clone(),
+        StyleToken::TextDim => palette.text_dim.clone(),
+        StyleToken::TextMuted => palette.text_muted.clone(),
+        StyleToken::Primary => palette.primary.clone(),
+        StyleToken::Warning => palette.warning.clone(),
+        StyleToken::Accent => palette.accent.clone(),
+        StyleToken::Default => String::new(),
+    }
+}
+
+/// Resolve the "slots" config for one layout into the style and format
+/// maps the renderer consumes. Base fields first, then the nested
+/// normal/compact object on top; invalid values drop (fail-soft). Entries
+/// with no effective style field stay out of the style map so segments keep
+/// their built-in coloring (threshold colors, stale muting).
+pub fn resolve_slots(
+    slots: Option<&std::collections::HashMap<String, SlotConfig>>,
+    compact_layout: bool,
+) -> ResolvedSlots {
+    let mut styles = std::collections::HashMap::new();
+    let mut formats = std::collections::HashMap::new();
+    let mut cwd_normal = None;
+    let mut cwd_compact = None;
+    let Some(slots) = slots else {
+        return ResolvedSlots {
+            styles,
+            formats,
+            cwd_normal: CwdStyle::Short,
+            cwd_compact: CwdStyle::Name,
+        };
+    };
+    for (slot, config) in slots {
+        let mut style = SegmentStyle::default();
+        let mut format: Option<SegmentFormat> = None;
+        let mut apply = |color: Option<&str>, bold: Option<bool>, fmt: Option<&str>| {
+            if let Some(color) = color.and_then(parse_style_color) {
+                style.color = Some(color);
+            }
+            if bold.is_some() {
+                style.bold = bold;
+            }
+            if let Some(parsed) = fmt.and_then(parse_format) {
+                format = Some(parsed);
+            }
+        };
+        apply(config.color.as_deref(), config.bold, config.format.as_deref());
+        if slot == "cwd" {
+            // The cwd form is read from both nested layers regardless of the
+            // configured layout: nested normal wins over the flat value,
+            // compact falls back to the next-shorter form of the effective
+            // normal style unless its nested object pins one.
+            cwd_normal = config
+                .normal
+                .as_ref()
+                .and_then(|l| CwdStyle::parse(l.format.as_deref()))
+                .or_else(|| CwdStyle::parse(config.format.as_deref()));
+            cwd_compact = config
+                .compact
+                .as_ref()
+                .and_then(|l| CwdStyle::parse(l.format.as_deref()));
+        }
+        if let Some(layer) = if compact_layout { config.compact.as_ref() } else { config.normal.as_ref() } {
+            apply(layer.color.as_deref(), layer.bold, layer.format.as_deref());
+        }
+        if style.color.is_some() || style.bold.is_some() {
+            styles.insert(slot.clone(), style);
+        }
+        // cwd's `format` is a CwdStyle (short/full/name), not long/short.
+        if let Some(format) = format {
+            if slot != "cwd" {
+                formats.insert(slot.clone(), format);
+            }
+        }
+    }
+    let cwd_normal = cwd_normal.unwrap_or(CwdStyle::Short);
+    ResolvedSlots {
+        styles,
+        formats,
+        cwd_normal,
+        cwd_compact: cwd_compact.unwrap_or_else(|| cwd_normal.compact_fallback()),
+    }
+}
+
+/// Everything the renderer needs from the "slots" config section.
+pub struct ResolvedSlots {
+    pub styles: std::collections::HashMap<String, SegmentStyle>,
+    pub formats: std::collections::HashMap<String, SegmentFormat>,
+    /// cwd form per layout: flat `format` value, nested overrides applied,
+    /// compact deriving the next-shorter style unless pinned.
+    pub cwd_normal: CwdStyle,
+    pub cwd_compact: CwdStyle,
 }
 
 fn colorize(enabled: bool, color: &str, text: &str) -> String {
@@ -279,10 +482,68 @@ pub struct RenderContext<'a> {
     pub git: GitSummary,
     pub items: &'a [String],
     pub cwd_style: CwdStyle,
+    pub cwd_compact: CwdStyle,
+    pub styles: &'a std::collections::HashMap<String, SegmentStyle>,
+    pub formats: &'a std::collections::HashMap<String, SegmentFormat>,
     pub layout: &'a str,
     pub color: bool,
     pub theme: Theme,
     pub now: u64,
+}
+
+/// SGR prefix for a slot with a user style override, or None when the slot
+/// renders with its built-in default. `default_bold` is the slot's built-in
+/// boldness, used when the override sets only a color.
+fn style_sgr(style: Option<&SegmentStyle>, palette: &Palette, default_color: &str, default_bold: bool) -> String {
+    let Some(style) = style else {
+        return if default_bold { bold(default_color.to_string()) } else { default_color.to_string() };
+    };
+    let color = match style.color {
+        Some(ResolvedColor::Token(token)) => token_sgr(palette, token),
+        Some(ResolvedColor::Hex(r, g, b)) => rgb(r, g, b),
+        None => String::new(),
+    };
+    if style.bold.unwrap_or(default_bold) {
+        bold(color)
+    } else {
+        color
+    }
+}
+
+/// Composed SGR for a slot: the override if configured, else the segment
+/// default color and boldness.
+fn slot_sgr(ctx: &RenderContext, palette: &Palette, slot: &str, default_color: &str, default_bold: bool) -> String {
+    style_sgr(ctx.styles.get(slot), palette, default_color, default_bold)
+}
+
+/// Like slot_sgr but for one mode badge: a badge-specific override
+/// ("auto"/"yolo"/"plan"/"swarm") wins over the generic "mode" one.
+fn mode_badge_sgr(ctx: &RenderContext, palette: &Palette, badge: &str, default_color: &str) -> String {
+    let style = ctx
+        .styles
+        .get(badge)
+        .or_else(|| ctx.styles.get("mode"));
+    style_sgr(style, palette, default_color, true)
+}
+
+/// The slot's effective format: explicit config wins, else the layout
+/// default (compact = short, normal = long).
+fn short_form(ctx: &RenderContext, slot: &str, compact: bool) -> bool {
+    match ctx.formats.get(slot) {
+        Some(SegmentFormat::Short) => true,
+        Some(SegmentFormat::Long) => false,
+        None => compact,
+    }
+}
+
+/// Wrap a plain-text segment with its style override when one is configured;
+/// None means no override and the caller keeps its built-in coloring.
+fn styled(ctx: &RenderContext, palette: &Palette, slot: &str, text: &str, default_bold: bool) -> Option<String> {
+    let style = ctx.styles.get(slot)?;
+    if style.color.is_none() && style.bold.is_none() {
+        return None;
+    }
+    Some(colorize(ctx.color, &style_sgr(Some(style), palette, "", default_bold), text))
 }
 
 /// The footer's mode slot: auto/yolo (warning), plan (primary), swarm
@@ -293,48 +554,39 @@ fn mode_slot(ctx: &RenderContext, palette: &Palette) -> Option<String> {
     match ctx.payload.permission_mode.as_deref() {
         Some("auto") | Some("yolo") => {
             let mode = ctx.payload.permission_mode.as_deref().unwrap_or_default();
-            modes.push(colorize(ctx.color, &palette.warning, mode));
+            modes.push(colorize(ctx.color, &mode_badge_sgr(ctx, palette, mode, &palette.warning), mode));
         }
         _ => {}
     }
     if ctx.payload.plan_mode.unwrap_or(false) {
-        modes.push(colorize(ctx.color, &palette.primary, "plan"));
+        modes.push(colorize(ctx.color, &mode_badge_sgr(ctx, palette, "plan", &palette.primary), "plan"));
     }
     if ctx.metrics.swarm_mode || ctx.payload.swarm_mode.unwrap_or(false) {
-        modes.push(colorize(ctx.color, &palette.accent, "swarm"));
+        modes.push(colorize(ctx.color, &mode_badge_sgr(ctx, palette, "swarm", &palette.accent), "swarm"));
     }
     (!modes.is_empty()).then(|| modes.join(" "))
 }
 
-/// The footer's model slot: model display name in plain text color with the
-/// host's thinking suffix (" thinking" / " thinking: <effort>", none when
-/// off). An unconfirmed inference renders the suffix muted, like the
-/// provisional TPS reading.
+/// The footer's model slot: model display name plus the host's thinking
+/// suffix (" thinking" / " thinking: <effort>", none when off), the whole
+/// label in plain text color exactly like chalk.hex(colors.text)(label).
 fn model_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
     let model = sanitize_terminal_text(ctx.payload.model.as_deref().unwrap_or(""));
     if model.is_empty() {
         return None;
     }
-    let mut segment = colorize(ctx.color, &palette.text, &model);
     let level = ctx
         .metrics
         .thinking_level
         .as_deref()
         .filter(|l| !l.is_empty() && *l != "off")
         .map(sanitize_terminal_text);
-    if let Some(level) = level {
-        let suffix = if level == "on" {
-            " thinking".to_string()
-        } else {
-            format!(" thinking: {}", level)
-        };
-        segment.push_str(&if ctx.metrics.thinking_provisional {
-            colorize(ctx.color, &palette.text_muted, &suffix)
-        } else {
-            suffix
-        });
-    }
-    Some(segment)
+    let suffix = match level.as_deref() {
+        None => String::new(),
+        Some("on") => " thinking".to_string(),
+        Some(level) => format!(" thinking: {}", level),
+    };
+    Some(colorize(ctx.color, &slot_sgr(ctx, palette, "model", &palette.text, false), &format!("{}{}", model, suffix)))
 }
 
 fn home_dir() -> Option<String> {
@@ -363,18 +615,14 @@ fn cwd_last_component(path: &str) -> String {
 }
 
 /// The footer's cwd slot (textDim): host-style `…/` abbreviation by default,
-/// or the full path / last component per config. Compact degrades
-/// full -> short -> name.
+/// or the full path / last component per format; the compact layout gets the
+/// next-shorter form unless pinned via slots.cwd.compact.format.
 fn cwd_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<String> {
     let cwd = sanitize_terminal_text(ctx.payload.cwd.as_deref().unwrap_or(""));
     if cwd.is_empty() {
         return None;
     }
-    let style = match (ctx.cwd_style, compact) {
-        (CwdStyle::Full, true) => CwdStyle::Short,
-        (CwdStyle::Short, true) => CwdStyle::Name,
-        (style, _) => style,
-    };
+    let style = if compact { ctx.cwd_compact } else { ctx.cwd_style };
     let home = home_dir();
     let text = match style {
         CwdStyle::Full => abbreviate_home(&cwd, home.as_deref()),
@@ -395,13 +643,13 @@ fn cwd_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<
             }
         }
     };
-    Some(colorize(ctx.color, &palette.text_dim, &text))
+    Some(colorize(ctx.color, &slot_sgr(ctx, palette, "cwd", &palette.text_dim, false), &text))
 }
 
 /// The footer's git badge (textDim), mirroring formatGitBadgeBase:
 /// `main` / `main [±]` / `main [+3 -1 ↑2 ↓1]`. The branch comes from the
 /// host payload when present, else from our own probe.
-fn git_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
+fn git_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<String> {
     let branch = ctx
         .payload
         .git_branch
@@ -433,15 +681,21 @@ fn git_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
     if !sync.is_empty() {
         parts.push(sync);
     }
-    let text = if parts.is_empty() {
+    let text = if short {
+        if ctx.git.dirty {
+            format!("{}*", branch)
+        } else {
+            branch
+        }
+    } else if parts.is_empty() {
         branch
     } else {
         format!("{} [{}]", branch, parts.join(" "))
     };
-    Some(colorize(ctx.color, &palette.text_dim, &text))
+    Some(colorize(ctx.color, &slot_sgr(ctx, palette, "git", &palette.text_dim, false), &text))
 }
 
-fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<String> {
+fn speed_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<String> {
     let metrics = ctx.metrics;
     let now = ctx.now as i64;
     let live_subagents = metrics
@@ -463,16 +717,17 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
         None
     };
 
+    let speed_styled = ctx.styles.contains_key("speed");
     if let Some(tps) = metrics.tps {
         let average = tps.round();
         let paint = |text: &str| -> String {
-            if metrics.tps_stale {
+            if metrics.tps_stale && !speed_styled {
                 colorize(ctx.color, &palette.text_muted, text)
             } else {
                 text.to_string()
             }
         };
-        if compact {
+        if short {
             let count = if multi && metrics.main_speed {
                 format!("main+{}", metrics.tps_agents - 1)
             } else {
@@ -509,7 +764,8 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
             return Some(format!("{} · compacting {}", paint(&base), c));
         }
         if let Some(c) = &compacted {
-            return Some(format!("{}{}", paint(&base), colorize(ctx.color, &palette.text_muted, &format!(" · compacted {}", c))));
+            let muted = if speed_styled { format!(" · compacted {}", c) } else { colorize(ctx.color, &palette.text_muted, &format!(" · compacted {}", c)) };
+        return Some(format!("{}{}", paint(&base), muted));
         }
         return match format_ttft(metrics.ttft_ms) {
             Some(ttft) => Some(paint(&format!("{} · TTFT {}", base, ttft))),
@@ -528,29 +784,34 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
         return Some(format!("compacting {}", c));
     }
     if let Some(c) = &compacted {
-        if !compact {
-            return Some(colorize(ctx.color, &palette.text_muted, &format!("compacted {}", c)));
+        if !short {
+            let text = format!("compacted {}", c);
+            return Some(if speed_styled { text } else { colorize(ctx.color, &palette.text_muted, &text) });
         }
     }
     format_ttft(metrics.ttft_ms).map(|ttft| format!("TTFT {}", ttft))
 }
 
-fn cache_segment(ctx: &RenderContext) -> Option<String> {
+fn cache_segment(ctx: &RenderContext, short: bool) -> Option<String> {
     let hit_rate = ctx.metrics.cache.as_ref()?.hit_rate;
     if !hit_rate.is_finite() || !(0.0..=1.0).contains(&hit_rate) {
         return None;
     }
-    Some(format!("Cache {}%", (hit_rate * 100.0).round() as i64))
+    let label = if short { "C" } else { "Cache" };
+    Some(format!("{} {}%", label, (hit_rate * 100.0).round() as i64))
 }
 
-fn quota_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Option<String> {
+fn quota_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<String> {
     let quota = ctx.quota?;
+    let quota_styled = ctx.styles.contains_key("quota");
     let mut parts: Vec<String> = Vec::new();
     for window in &quota.windows {
         let fraction = window.used / window.limit;
         let pct = format!("{}%", pct_of(window.used, window.limit));
         let label = sanitize_terminal_text(&window.label);
-        let mut text = if compact {
+        let mut text = if quota_styled {
+            format!("{} {}", label, pct)
+        } else if short {
             match number_level_color(fraction, palette) {
                 Some(level) => format!("{} {}", label, colorize(ctx.color, &level, &pct)),
                 None => format!("{} {}", label, pct),
@@ -566,7 +827,9 @@ fn quota_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
     if let Some(weekly) = &quota.weekly {
         let fraction = weekly.used / weekly.limit;
         let pct = format!("{}%", pct_of(weekly.used, weekly.limit));
-        let mut text = if compact {
+        let mut text = if quota_styled {
+            format!("7d {pct}")
+        } else if short {
             match number_level_color(fraction, palette) {
                 Some(level) => format!("7d {}", colorize(ctx.color, &level, &pct)),
                 None => format!("7d {pct}"),
@@ -589,10 +852,13 @@ fn slot_segment(ctx: &RenderContext, palette: &Palette, name: &str, compact: boo
         "mode" => mode_slot(ctx, palette),
         "model" => model_segment(ctx, palette),
         "cwd" => cwd_segment(ctx, palette, compact),
-        "git" => git_segment(ctx, palette),
-        "speed" => speed_segment(ctx, palette, compact),
-        "cache" => cache_segment(ctx),
-        "quota" => quota_segment(ctx, palette, compact),
+        "git" => git_segment(ctx, palette, short_form(ctx, "git", compact)),
+        "speed" => speed_segment(ctx, palette, short_form(ctx, "speed", compact))
+            .map(|s| styled(ctx, palette, "speed", &s, false).unwrap_or(s)),
+        "cache" => cache_segment(ctx, short_form(ctx, "cache", compact))
+            .map(|s| styled(ctx, palette, "cache", &s, false).unwrap_or(s)),
+        "quota" => quota_segment(ctx, palette, short_form(ctx, "quota", compact))
+            .map(|s| styled(ctx, palette, "quota", &s, false).unwrap_or(s)),
         _ => None,
     }
 }
@@ -648,6 +914,14 @@ mod tests {
         DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect()
     }
 
+    fn empty_styles() -> &'static std::collections::HashMap<String, SegmentStyle> {
+        Box::leak(Box::new(std::collections::HashMap::new()))
+    }
+
+    fn empty_formats() -> &'static std::collections::HashMap<String, SegmentFormat> {
+        Box::leak(Box::new(std::collections::HashMap::new()))
+    }
+
     fn ctx<'a>(
         payload: &'a Payload,
         metrics_value: &'a MetricsSummary,
@@ -661,11 +935,217 @@ mod tests {
             git: GitSummary::default(),
             items,
             cwd_style: CwdStyle::Short,
+            cwd_compact: CwdStyle::Name,
+            styles: empty_styles(),
+            formats: empty_formats(),
             layout: "normal",
             color: false,
             theme: Theme::Dark,
             now: 1_800_000_000_000,
         }
+    }
+
+    fn styled_ctx<'a>(
+        payload: &'a Payload,
+        metrics_value: &'a MetricsSummary,
+        quota: Option<&'a QuotaCache>,
+        styles: &'a std::collections::HashMap<String, SegmentStyle>,
+    ) -> RenderContext<'a> {
+        RenderContext {
+            styles,
+            ..ctx(payload, metrics_value, quota)
+        }
+    }
+
+    fn formats_ctx<'a>(
+        payload: &'a Payload,
+        metrics_value: &'a MetricsSummary,
+        quota: Option<&'a QuotaCache>,
+        formats: &'a std::collections::HashMap<String, SegmentFormat>,
+        layout: &'a str,
+    ) -> RenderContext<'a> {
+        RenderContext {
+            formats,
+            layout,
+            ..ctx(payload, metrics_value, quota)
+        }
+    }
+
+    #[test]
+    fn format_overrides_beat_layout_defaults() {
+        let mut payload = base_payload();
+        payload.permission_mode = Some("yolo".to_string());
+        let mut m = metrics();
+        m.tps = Some(46.7);
+        m.cache = Some(crate::metrics::CacheMetric { hit_rate: 0.92 });
+        let mut formats = std::collections::HashMap::new();
+        formats.insert("git".to_string(), SegmentFormat::Short);
+        formats.insert("cache".to_string(), SegmentFormat::Short);
+        formats.insert("speed".to_string(), SegmentFormat::Long);
+
+        let dirty = GitSummary { dirty: true, ..GitSummary::default() };
+
+        // Normal layout with short git/cache forced: main* and C 92%.
+        let ctx = RenderContext { git: dirty.clone(), ..formats_ctx(&payload, &m, None, &formats, "normal") };
+        let line = render_hud(&ctx);
+        assert!(line.contains("main*"), "line was: {line}");
+        assert!(line.contains("C 92%"), "line was: {line}");
+        assert!(line.contains("⚡ 47 t/s"), "long speed forced: {line}");
+
+        // Compact layout with long speed forced keeps the long reading.
+        let ctx = RenderContext { git: dirty, ..formats_ctx(&payload, &m, None, &formats, "compact") };
+        let line = render_hud(&ctx);
+        assert!(line.contains("⚡ 47 t/s"), "line was: {line}");
+
+        // No overrides: compact defaults shorten everything.
+        let empty = std::collections::HashMap::new();
+        let ctx = RenderContext {
+            git: GitSummary { dirty: true, ..GitSummary::default() },
+            ..formats_ctx(&payload, &m, None, &empty, "compact")
+        };
+        let line = render_hud(&ctx);
+        assert!(line.contains("main*"), "line was: {line}");
+        assert!(line.contains("⚡ 47 "), "line was: {line}");
+        assert!(!line.contains("t/s"), "line was: {line}");
+        assert!(line.contains("C 92%"), "line was: {line}");
+    }
+
+    #[test]
+    fn style_overrides_recolor_slots() {
+        let payload = base_payload();
+        let m = metrics();
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(
+            "git".to_string(),
+            SegmentStyle {
+                color: Some(ResolvedColor::Hex(255, 136, 0)),
+                bold: Some(true),
+            },
+        );
+        styles.insert(
+            "model".to_string(),
+            SegmentStyle { color: Some(ResolvedColor::Token(StyleToken::TextMuted)), bold: None },
+        );
+        let ctx = RenderContext { color: true, ..styled_ctx(&payload, &m, None, &styles) };
+        let line = render_hud(&ctx);
+        let palette = dark_palette();
+        let expected_git = "\x1b[1m\x1b[38;2;255;136;0mmain\x1b[0m";
+        assert!(line.contains(&expected_git), "line was: {line:?}");
+        // Token override: model painted with the palette's text_muted SGR.
+        assert!(line.contains(&format!("{}K3\x1b[0m", palette.text_muted)), "line was: {line:?}");
+        let _ = palette;
+    }
+
+    #[test]
+    fn speed_style_wraps_whole_segment_even_when_stale() {
+        let payload = base_payload();
+        let mut m = metrics();
+        m.tps = Some(46.7);
+        m.tps_stale = true;
+        let mut styles = std::collections::HashMap::new();
+        styles.insert(
+            "speed".to_string(),
+            SegmentStyle { color: Some(ResolvedColor::Token(StyleToken::Accent)), bold: Some(true) },
+        );
+        let ctx = RenderContext { color: true, ..styled_ctx(&payload, &m, None, &styles) };
+        let line = render_hud(&ctx);
+        let palette = dark_palette();
+        // One wrap around the whole reading; no stale-muting inside.
+        assert!(!line.contains(&palette.text_muted), "line was: {line:?}");
+        assert!(line.contains(&format!("\x1b[1m{}⚡ 47 t/s", palette.accent)), "line was: {line:?}");
+    }
+
+    #[test]
+    fn resolve_slots_layers_and_fail_soft() {
+        use std::collections::HashMap;
+        let mut slots: HashMap<String, SlotConfig> = HashMap::new();
+        slots.insert(
+            "git".to_string(),
+            SlotConfig {
+                color: Some("#888888".to_string()),
+                bold: Some(false),
+                normal: Some(SlotOverrides {
+                    color: Some("primary".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        // Invalid color drops; valid bold sticks.
+        slots.insert(
+            "cwd".to_string(),
+            SlotConfig { color: Some("nope".to_string()), bold: Some(true), ..Default::default() },
+        );
+        // Format-only entries land in formats, not styles.
+        slots.insert(
+            "speed".to_string(),
+            SlotConfig {
+                compact: Some(SlotOverrides { format: Some("long".to_string()), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        let normal = resolve_slots(Some(&slots), false);
+        let styles_normal = &normal.styles;
+        let formats_normal = &normal.formats;
+        // Nested normal layer wins per-field; unspecified bold survives.
+        assert_eq!(
+            styles_normal.get("git"),
+            Some(&SegmentStyle {
+                color: Some(ResolvedColor::Token(StyleToken::Primary)),
+                bold: Some(false),
+            })
+        );
+        assert_eq!(
+            styles_normal.get("cwd"),
+            Some(&SegmentStyle { color: None, bold: Some(true) })
+        );
+        assert!(!styles_normal.contains_key("speed"));
+        // Compact: speed forced long; git keeps the base hex color.
+        let compact = resolve_slots(Some(&slots), true);
+        let styles_compact = &compact.styles;
+        let formats_compact = &compact.formats;
+        assert_eq!(formats_compact.get("speed"), Some(&SegmentFormat::Long));
+        assert_eq!(
+            styles_compact.get("git"),
+            Some(&SegmentStyle {
+                color: Some(ResolvedColor::Hex(136, 136, 136)),
+                bold: Some(false),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_slots_cwd_format_and_derivation() {
+        use std::collections::HashMap;
+        let mut slots: HashMap<String, SlotConfig> = HashMap::new();
+        // Flat full: normal full, compact derives short. "long" aliases full.
+        slots.insert(
+            "cwd".to_string(),
+            SlotConfig { format: Some("long".to_string()), ..Default::default() },
+        );
+        let resolved = resolve_slots(Some(&slots), false);
+        assert_eq!(resolved.cwd_normal, CwdStyle::Full);
+        assert_eq!(resolved.cwd_compact, CwdStyle::Short);
+        // Nested compact pins full even in the compact layout.
+        let mut slots: HashMap<String, SlotConfig> = HashMap::new();
+        slots.insert(
+            "cwd".to_string(),
+            SlotConfig {
+                format: Some("short".to_string()),
+                compact: Some(SlotOverrides {
+                    format: Some("full".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve_slots(Some(&slots), true);
+        assert_eq!(resolved.cwd_normal, CwdStyle::Short);
+        assert_eq!(resolved.cwd_compact, CwdStyle::Full);
+        // No cwd entry: built-in defaults.
+        let resolved = resolve_slots(None, false);
+        assert_eq!(resolved.cwd_normal, CwdStyle::Short);
+        assert_eq!(resolved.cwd_compact, CwdStyle::Name);
     }
 
     #[test]

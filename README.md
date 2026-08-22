@@ -42,11 +42,21 @@ cargo build --release
 
 ## 配置
 
-- `~/.kimi-code-hud-rs/config.json`：
+- `~/.kimi-code-hud-rs/config.json`（JSONC：支持 `//`、`/* */` 注释与尾逗号；`--install` 时不存在则生成带注释的默认文件）：
   - `"layout": "compact"|"normal"`（默认 `normal`）；
-  - `"cwd": "short"|"full"|"name"` —— 路径样式：`short` 为原版 footer 缩写（`~` + 最多 3 层，超出前缀 `…/`，默认）、`full` 为完整路径（家目录仍缩写为 `~`）、`name` 为只显示最后一层；
   - `"items": [...]` —— slot 顺序，可任意排列、省略或重复，未知项忽略。默认 `["mode","model","cwd","git","speed","cache","quota"]`；
-- 环境变量 `KIMI_HUD_RS_LAYOUT` / `KIMI_HUD_RS_CWD` / `KIMI_HUD_RS_ITEMS`（逗号分隔）优先于配置文件；
+  - `"slots"` —— 按 slot 合并的样式与格式配置，键为 slot 名（mode 徽章按 `auto`/`yolo`/`plan`/`swarm` 单独设键）：
+    ```jsonc
+    "slots": {
+      "git": {
+        "color": "text_dim",          // 平铺字段:两种布局都生效
+        "normal":  { "format": "long" },    // 嵌套:仅该布局,字段级覆盖平铺值
+        "compact": { "format": "short" }
+      }
+    }
+    ```
+    `color` 可为主题 token（`text`/`text_dim`/`text_muted`/`primary`/`warning`/`accent`/`default`）或 `#RRGGBB`；`bold` 为布尔；`format` 按 slot 取值——git/speed/cache/quota 为 `long`/`short`（短形态：git `main*`、speed `⚡ 47`、cache `C 92%`、quota 无进度条），cwd 为 `short`（原版缩写，`~` + 最多 3 层 + `…/` 前缀，默认）/`full`（完整路径，`long` 为别名）/`name`（最后一层），compact 布局自动取次短形态（full→short→name），可用嵌套 `compact.format` 显式钉住。都未配置时用内置缺省（normal 全长、compact 全短、原版 footer 配色）。`--install` 生成的默认文件把全部默认值预填进 `slots`，直接原地改即可；`speed`/`cache`/`quota` 的颜色刻意留空——设定后整段统一着色并取代阈值色与 stale 灰显；
+- 环境变量 `KIMI_HUD_RS_LAYOUT` / `KIMI_HUD_RS_CWD`（覆盖 slots.cwd，两布局生效且 compact 仍自动降级）/ `KIMI_HUD_RS_ITEMS`（逗号分隔）优先于配置文件；
 - `NO_COLOR` / `KIMI_HUD_RS_NO_COLOR`：禁用全部 ANSI 颜色；
 - `KIMI_HUD_RS_THEME=dark|light`：手动固定配色主题；缺省跟随 `tui.toml` 顶层 `theme`，`auto` 经 `COLORFGBG` 判定、回退 dark；
 - `KIMI_CODE_HOME` / `KIMI_HUD_RS_HOME` / `KIMI_HUD_RS_TUI_TOML` / `KIMI_HUD_RS_CONFIG_TOML`：路径覆盖（测试与沙箱用）。
@@ -55,7 +65,7 @@ slot 之间以原版 footer 的双空格分隔；前四个 slot（mode/model/cwd
 
 ```
 normal:  auto  K3 thinking: high  …/RustProjects/kimi-code-hud-rs  main [+3 -1 ↑2]  ⚡ 47 t/s · TTFT 1.3s  Cache 92%  5h ███░░░░░░░ 31% ~2h18m · 7d ██░░░░░░░░ 25% ~3d2h
-compact: auto  K3 thinking: high  kimi-code-hud-rs  main [±]  ⚡ 47  Cache 92%  5h 31% ~2h18m  7d 25% ~3d2h
+compact: auto  K3 thinking: high  kimi-code-hud-rs  main*  ⚡ 47  C 92%  5h 31% ~2h18m  7d 25% ~3d2h
 ```
 
 ## 原理
@@ -68,7 +78,7 @@ Kimi Code 的 `~/.kimi-code/tui.toml` 支持 `[status_line]` 自定义命令：�
 |---|---|
 | 分支 / 脏 / ±计数 / ↑↓ | stdin 快照（分支）+ 进程内 [gix](https://github.com/GitoxideLabs/gitoxide)（gitoxide）探测：status 算脏与 ↑↓、HEAD blob 对工作区（经 CRLF/过滤器）逐行 diff 算 +N -N。不依赖 `git` 二进制、不 spawn 子进程；结果跨进程缓存 15 秒（cwd 只存 SHA-256）。±计数与 `git diff --numstat HEAD` 同为 Myers 差异算法族，个别仓库可能有 ±个位的算法性偏差 |
 | TPS / TTFT / gen / 压缩计时 / Cache / thinking / swarm | 增量解析 `~/.kimi-code/sessions/*/session_<id>/agents/*/wire.jsonl`（main + 全部 subagent）。每 agent 维护持久化字节游标（`~/.kimi-code-hud-rs/metrics-<sessionId>.json`），每帧只读新增字节（≤1MiB），半行 JSON 跨进程无损拼接，尾部指纹检测文件原地重写。速度样本带事件时间戳，多 agent 活跃时聚合为舰队总速 `⚡ 156 t/s (3 agents @52)` |
-| thinking 强度 | wire 事件（`llm.request` / `config.update` / `profile.bind`）> 按会话固定的快照（`thinking-<sessionId>.json`，防止其他会话 `/effort` 改全局配置影响本会话）> `config.toml` 的 `[thinking]` 与模型表回退推断；未确认值以暗灰显示 |
+| thinking 强度 | wire 事件（`llm.request` / `config.update` / `profile.bind`）> 按会话固定的快照（`thinking-<sessionId>.json`，防止其他会话 `/effort` 改全局配置影响本会话）> `config.toml` 的 `[thinking]` 与模型表回退推断 |
 | 配额（5h/7d） | 官方 `/usages` 配额接口（`api.kimi.com` / `api.kimi.ai`，按 oauth host / base_url 判区，任何非官方地址一律回退默认）。热路径只读 60 秒 TTL 缓存，过期时经文件锁去重后 spawn 分离的 `--refresh-quota` 子进程刷新，绝不阻塞渲染。仅当前模型归因于 `managed:kimi-code` 时显示；`/logout` 后缓存自动删除 |
 
 ## 隐私与安全

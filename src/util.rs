@@ -205,3 +205,100 @@ mod tests {
         assert_eq!(safe_component("ses_abc/../../x"), "ses_abc_______x");
     }
 }
+
+/// Strip JSONC extensions — `//` line comments, `/* */` block comments and
+/// trailing commas — into plain JSON for serde. String-aware: comment
+/// markers and commas inside quoted strings are preserved verbatim.
+/// Newlines inside comments are kept so error line numbers stay honest.
+pub fn strip_jsonc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if c == '\\' {
+                if let Some(&escaped) = chars.peek() {
+                    out.push(escaped);
+                    chars.next();
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    if c == '\n' {
+                        out.push('\n');
+                    }
+                    prev = c;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    strip_trailing_commas(&out)
+}
+
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            ',' => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                // Keep the comma unless the next non-blank closes a scope.
+                if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                    // skip
+                } else {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    out
+}
