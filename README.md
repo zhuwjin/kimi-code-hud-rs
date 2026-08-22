@@ -55,7 +55,7 @@ slot 之间以原版 footer 的双空格分隔；前四个 slot（mode/model/cwd
 
 ```
 normal:  auto  K3 thinking: high  …/RustProjects/kimi-code-hud-rs  main [+3 -1 ↑2]  ⚡ 47 t/s · TTFT 1.3s  Cache 92%  5h ███░░░░░░░ 31% ~2h18m · 7d ██░░░░░░░░ 25% ~3d2h
-compact: auto  K3 thinking: high  kimi-code-hud-rs  main [±]  ⚡ 47  Cache 92%  5h 31% ~2h18m
+compact: auto  K3 thinking: high  kimi-code-hud-rs  main [±]  ⚡ 47  Cache 92%  5h 31% ~2h18m  7d 25% ~3d2h
 ```
 
 ## 原理

@@ -563,19 +563,21 @@ fn quota_segment(ctx: &RenderContext, palette: &Palette, compact: bool) -> Optio
         }
         parts.push(text);
     }
-    if !compact {
-        if let Some(weekly) = &quota.weekly {
-            let fraction = weekly.used / weekly.limit;
-            let mut text = format!(
-                "7d {} {}%",
-                bar(fraction, ctx.color, palette),
-                pct_of(weekly.used, weekly.limit)
-            );
-            if let Some(countdown) = format_countdown(weekly.reset_at.as_deref(), ctx.now) {
-                text.push_str(&format!(" {}", countdown));
+    if let Some(weekly) = &quota.weekly {
+        let fraction = weekly.used / weekly.limit;
+        let pct = format!("{}%", pct_of(weekly.used, weekly.limit));
+        let mut text = if compact {
+            match number_level_color(fraction, palette) {
+                Some(level) => format!("7d {}", colorize(ctx.color, &level, &pct)),
+                None => format!("7d {pct}"),
             }
-            parts.push(text);
+        } else {
+            format!("7d {} {}", bar(fraction, ctx.color, palette), pct)
+        };
+        if let Some(countdown) = format_countdown(weekly.reset_at.as_deref(), ctx.now) {
+            text.push_str(&format!(" {}", countdown));
         }
+        parts.push(text);
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -890,6 +892,16 @@ mod tests {
         assert!(line.contains("7d"));
         assert!(line.contains("25%"));
         assert!(line.contains("░"));
+
+        // Compact keeps both windows, dropping only the bars.
+        let compact = RenderContext {
+            layout: "compact",
+            ..ctx(&payload, &m, Some(&quota))
+        };
+        let line = render_hud(&compact);
+        assert!(line.contains("5h 31%"), "line was: {line}");
+        assert!(line.contains("7d 25%"), "line was: {line}");
+        assert!(!line.contains("░"));
     }
 
     #[test]
