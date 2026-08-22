@@ -28,7 +28,7 @@ cargo build --release
 ./target/release/kimi-code-hud-rs --install
 ```
 
-`--install` 会先备份再修改 `~/.kimi-code/tui.toml`（幂等，保留其他设置）：在 `[status_line]` 段写入 `command = "<可执行文件绝对路径>"`。构建路径含空格时会把二进制复制到 `~/.kimi-code-hud-rs/bin/` 再引用该副本。
+`--install` 会先备份再修改 `~/.kimi-code/tui.toml`（幂等，保留其他设置）：在 `[status_line]` 段写入 `command = "<可执行文件绝对路径>"`。构建路径含空格时会把二进制复制到 `~/.kimi-code-hud-rs/bin/` 再引用该副本。若 `~/.kimi-code-hud-rs/config.json` 尚不存在，会生成一份显式默认值（已存在则绝不改写）。
 
 **重启 Kimi Code 或运行 `/reload-tui` 生效。** 如果 `[status_line]` 已配置了别的命令，`--install` 不会覆盖它。
 

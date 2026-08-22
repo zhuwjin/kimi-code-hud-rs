@@ -126,6 +126,24 @@ pub fn status_line_command(exe: &Path) -> String {
     exe_command_word(exe)
 }
 
+/// Create config.json with explicit defaults when it does not exist yet, so
+/// the file is discoverable right after --install. An existing file is never
+/// touched — even an unparseable one may hold user edits.
+fn ensure_default_config(config_path: &Path) -> bool {
+    if config_path.exists() {
+        return false;
+    }
+    let config = HudConfig {
+        layout: Some("normal".to_string()),
+        cwd: Some("short".to_string()),
+        items: Some(crate::render::DEFAULT_ITEMS.iter().map(|s| s.to_string()).collect()),
+    };
+    match serde_json::to_string_pretty(&config) {
+        Ok(text) => atomic_write(config_path, format!("{}\n", text).as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
 fn backup_file(path: &Path) {
     // Best effort: the timestamped copy is a convenience, the atomic target
     // write below remains authoritative.
@@ -184,6 +202,9 @@ pub fn install(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
     if install_status_line(paths, &command) {
         println!("Registered status line in {}", paths.tui_toml_path.display());
     }
+    if ensure_default_config(&paths.hud_config_path) {
+        println!("Created default config at {}", paths.hud_config_path.display());
+    }
     Ok(())
 }
 
@@ -200,6 +221,23 @@ pub fn uninstall(exe: &Path, paths: &RuntimePaths) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::toml_edit::{get_status_line_command, is_own_command, set_status_line_command};
+
+    #[test]
+    fn default_config_created_once_and_never_clobbered() {
+        let dir = std::env::temp_dir().join(format!("kimi-hud-rs-cfg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+        assert!(ensure_default_config(&path));
+        let created = fs::read_to_string(&path).unwrap();
+        assert!(created.contains("\"layout\": \"normal\""));
+        assert!(created.contains("\"cwd\": \"short\""));
+        assert!(created.contains("\"items\""));
+        // Already present: never rewritten, user edits survive.
+        fs::write(&path, "{\"layout\": \"compact\"}").unwrap();
+        assert!(!ensure_default_config(&path));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"layout\": \"compact\"}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn bare_paths_stay_bare() {
