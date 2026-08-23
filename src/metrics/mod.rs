@@ -163,13 +163,32 @@ mod tests {
         let s2 = get_metrics(Some("abc"), &root, &state_dir, Instant::now() + Duration::from_secs(5), now + 50);
         assert_eq!(s2.turn_started_at, Some(1000));
 
-        // Append more rows; the cursor picks them up.
-        let append = "{\"type\":\"turn.ended\",\"time\":2000}\n";
+        // Append task rows; the summary counts running background tasks.
+        let append = concat!(
+            "{\"type\":\"task.started\",\"info\":{\"taskId\":\"bash-1\",\"status\":\"running\"},\"time\":1500}\n",
+            "{\"type\":\"task.started\",\"info\":{\"taskId\":\"agent-1\",\"status\":\"running\"},\"time\":1501}\n",
+            "{\"type\":\"task.started\",\"info\":{\"taskId\":\"bash-2\",\"status\":\"running\"},\"time\":1502}\n",
+            "{\"type\":\"task.terminated\",\"info\":{\"taskId\":\"bash-1\",\"status\":\"completed\"},\"time\":1600}\n",
+            "{\"type\":\"turn.ended\",\"time\":2000}\n"
+        );
         let mut f = fs::OpenOptions::new().append(true).open(&wire).unwrap();
         use std::io::Write;
         f.write_all(append.as_bytes()).unwrap();
         let s3 = get_metrics(Some("abc"), &root, &state_dir, Instant::now() + Duration::from_secs(5), 2100);
         assert_eq!(s3.turn_started_at, None, "turn ended closes the clock");
+        assert_eq!(s3.bg_tasks, 1, "bash-2 still running, bash-1 retired");
+        assert_eq!(s3.bg_agents, 1);
+        // A day later with no terminated rows: the liveness horizon retires
+        // both, the way a crash that never wrote task.terminated would.
+        let s4 = get_metrics(
+            Some("abc"),
+            &root,
+            &state_dir,
+            Instant::now() + Duration::from_secs(5),
+            2100 + 25 * 60 * 60 * 1000,
+        );
+        assert_eq!(s4.bg_tasks, 0);
+        assert_eq!(s4.bg_agents, 0);
 
         let _ = fs::remove_dir_all(&root);
     }

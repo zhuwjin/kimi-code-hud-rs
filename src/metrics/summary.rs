@@ -32,6 +32,10 @@ pub struct MetricsSummary {
     pub turn_started_at: Option<i64>,
     pub compacting_since: Option<i64>,
     pub compaction_ms: Option<i64>,
+    /// Background BPM tasks still running, split by kind like the host
+    /// footer's badges.
+    pub bg_tasks: u32,
+    pub bg_agents: u32,
 }
 
 fn median_of_fresh(fresh: &[Sample]) -> Option<f64> {
@@ -178,6 +182,14 @@ pub fn summarize(state: &mut MetricsState, now: i64, agent_names: &BTreeSet<Stri
             }
         }
     }
+
+    // A crash can leave a task.started without its terminated row; anything
+    // older than the horizon is dead in practice (real tasks are seconds to
+    // hours, never days).
+    const TASK_LIVENESS_MS: i64 = 24 * 60 * 60 * 1000;
+    let live = |id: &str| state.tasks.get(id).is_some_and(|started| now - started < TASK_LIVENESS_MS);
+    summary.bg_tasks = state.tasks.keys().filter(|id| id.starts_with("bash-") && live(id)).count() as u32;
+    summary.bg_agents = state.tasks.keys().filter(|id| id.starts_with("agent-") && live(id)).count() as u32;
 
     if state.cache.input_tokens > 0 {
         summary.cache = Some(CacheMetric {

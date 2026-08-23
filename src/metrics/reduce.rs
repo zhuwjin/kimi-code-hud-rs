@@ -43,6 +43,33 @@ pub fn process_row(state: &mut MetricsState, row: &Value, agent: &str) {
     apply_throughput_row(state, row, agent);
     apply_compaction_row(state, row, agent);
     apply_session_meta_row(state, row, agent);
+    apply_task_row(state, row);
+}
+
+/// Background BPM task lifecycle (bash-* shells, agent-* subagents) from any
+/// agent's wire: started records id → startedAt, terminated retires it.
+fn apply_task_row(state: &mut MetricsState, row: &Value) {
+    let kind = row_type(row);
+    if !matches!(kind, Some("task.started") | Some("task.terminated")) {
+        return;
+    }
+    let Some(info) = row.get("info") else { return };
+    let Some(id) = str_field(info, "taskId") else { return };
+    match kind {
+        Some("task.started") => {
+            let started_at = info
+                .get("startedAt")
+                .and_then(|v| v.as_f64())
+                .map(|t| t as i64)
+                .or_else(|| row_time(row))
+                .unwrap_or_default();
+            state.tasks.insert(id.to_string(), started_at);
+        }
+        Some("task.terminated") => {
+            state.tasks.remove(id);
+        }
+        _ => {}
+    }
 }
 
 /// Session-cumulative cache counters from the main agent's step.end usage.

@@ -142,6 +142,7 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
     let (cwd_style, cwd_compact) = cwd_pair_from(std::env::var("KIMI_HUD_RS_CWD").ok().as_deref(), &resolved);
     let styles = resolved.styles;
     let formats = resolved.formats;
+    let show_ttft = resolved.show_ttft;
     let items = items_from(std::env::var("KIMI_HUD_RS_ITEMS").ok().as_deref(), &hud_config);
     let color = color_from_env(
         std::env::var_os("NO_COLOR").is_some(),
@@ -162,6 +163,7 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         cwd_compact,
         styles: &styles,
         formats: &formats,
+        show_ttft,
         layout: &layout,
         color,
         theme,

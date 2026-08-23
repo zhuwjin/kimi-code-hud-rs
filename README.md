@@ -7,7 +7,7 @@
 与 Node 版的差异（有意为之）：
 
 - **不含第三方 provider 支持** —— 没有 DeepSeek / OpenAI / Anthropic 的余额查询与会话成本估算，只有托管订阅（`managed:kimi-code`）额度；
-- 不含 goal 徽章与后台任务徽章；
+- 不含 goal 徽章；后台任务徽章（`[N tasks running]` / `[N agents running]`）通过 wire 的 `task.started` / `task.terminated` 事件推断，与原版同款；
 - 配置与缓存目录为 `~/.kimi-code-hud-rs/`，与 Node 版的 `~/.kimi-code-hud/` 互不干扰，两者可以并存；
 - 插件（`/plugins`）托管方式未移植，只支持手动安装。
 
@@ -44,7 +44,7 @@ cargo build --release
 
 - `~/.kimi-code-hud-rs/config.json`（JSONC：支持 `//`、`/* */` 注释与尾逗号；`--install` 时不存在则生成带注释的默认文件）：
   - `"layout": "compact"|"normal"`（默认 `normal`）；
-  - `"items": [...]` —— slot 顺序，可任意排列、省略或重复，未知项忽略。默认 `["mode","model","cwd","git","speed","cache","quota"]`；
+  - `"items": [...]` —— slot 顺序，可任意排列、省略或重复，未知项忽略。默认 `["mode","model","tasks","cwd","git","speed","cache","quota"]`；
   - `"slots"` —— 按 slot 合并的样式与格式配置，键为 slot 名（mode 徽章按 `auto`/`yolo`/`plan`/`swarm` 单独设键）：
     ```jsonc
     "slots": {
@@ -55,7 +55,7 @@ cargo build --release
       }
     }
     ```
-    `color` 可为主题 token（`text`/`text_dim`/`text_muted`/`primary`/`warning`/`accent`/`default`）或 `#RRGGBB`；`bold` 为布尔；`format` 按 slot 取值——git/speed/cache/quota 为 `long`/`short`（短形态：git `main*`、speed `⚡ 47`、cache `C 92%`、quota 无进度条），cwd 为 `short`（原版缩写，`~` + 最多 3 层 + `…/` 前缀，默认）/`full`（完整路径，`long` 为别名）/`name`（最后一层），compact 布局自动取次短形态（full→short→name），可用嵌套 `compact.format` 显式钉住。都未配置时用内置缺省（normal 全长、compact 全短、原版 footer 配色）。`--install` 生成的默认文件把全部默认值预填进 `slots`，直接原地改即可；`speed`/`cache`/`quota` 的颜色刻意留空——设定后整段统一着色并取代阈值色与 stale 灰显；
+    `color` 可为主题 token（`text`/`text_dim`/`text_muted`/`primary`/`warning`/`accent`/`default`）或 `#RRGGBB`；`bold` 为布尔；`format` 按 slot 取值——git/speed/cache/quota 为 `long`/`short`（短形态：git `main*`、speed `⚡ 47`、cache `C 92%`、quota 无进度条），cwd 为 `short`（原版缩写，`~` + 最多 3 层 + `…/` 前缀，默认）/`full`（完整路径，`long` 为别名）/`name`（最后一层），compact 布局自动取次短形态（full→short→name），可用嵌套 `compact.format` 显式钉住；speed 另有 `"ttft": false` 可隐藏 TTFT 读数（默认显示，嵌套 `normal`/`compact` 里也可设）。都未配置时用内置缺省（normal 全长、compact 全短、原版 footer 配色）。`--install` 生成的默认文件把全部默认值预填进 `slots`，直接原地改即可；`speed`/`cache`/`quota` 的颜色刻意留空——设定后整段统一着色并取代阈值色与 stale 灰显；
 - 环境变量 `KIMI_HUD_RS_LAYOUT` / `KIMI_HUD_RS_CWD`（覆盖 slots.cwd，两布局生效且 compact 仍自动降级）/ `KIMI_HUD_RS_ITEMS`（逗号分隔）优先于配置文件；
 - `NO_COLOR` / `KIMI_HUD_RS_NO_COLOR`：禁用全部 ANSI 颜色；
 - `KIMI_HUD_RS_THEME=dark|light`：手动固定配色主题；缺省跟随 `tui.toml` 顶层 `theme`，`auto` 经 `COLORFGBG` 判定、回退 dark；

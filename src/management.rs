@@ -135,7 +135,7 @@ const DEFAULT_CONFIG_JSONC: &str = r##"{
   "layout": "normal",
 
   // Slot order; unknown names are ignored.
-  "items": ["mode", "model", "cwd", "git", "speed", "cache", "quota"],
+  "items": ["mode", "model", "tasks", "cwd", "git", "speed", "cache", "quota"],
 
   // Per-slot overrides, keyed by slot name. Flat fields apply to both
   // layouts; the nested "normal" / "compact" objects override them for
@@ -156,6 +156,9 @@ const DEFAULT_CONFIG_JSONC: &str = r##"{
     "swarm": { "color": "accent",  "bold": true },
 
     "model": { "color": "text" },
+    // Background task badges ("[2 tasks running] [1 agent running]"),
+    // shown only while nonzero.
+    "tasks": { "color": "primary" },
     // cwd format: "short" (host-like abbreviation), "full" (~-abbreviated
     // full path; "long" aliases it) or "name" (last component).
     "cwd":   {
@@ -169,6 +172,7 @@ const DEFAULT_CONFIG_JSONC: &str = r##"{
       "compact": { "format": "short" }
     },
     "speed": {
+      // "ttft": false hides the TTFT reading (default true).
       "normal":  { "format": "long" },
       "compact": { "format": "short" }
     },
@@ -293,7 +297,7 @@ mod tests {
         // Full schema present: the slots map is pre-filled with the
         // built-in defaults and resolves to identical output.
         let slots = parsed.slots.expect("slots pre-filled");
-        assert_eq!(slots.len(), 10);
+        assert_eq!(slots.len(), 11);
         let resolved_normal = crate::render::resolve_slots(Some(&slots), false);
         let resolved_compact = crate::render::resolve_slots(Some(&slots), true);
         // cwd: text_dim token, short form; no long/short format; compact derives name.

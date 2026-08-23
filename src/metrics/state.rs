@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::util;
 
-pub const METRICS_STATE_V: u32 = 1;
+pub const METRICS_STATE_V: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sample {
@@ -78,6 +78,12 @@ pub struct MetricsState {
     pub swarm_mode: bool,
     #[serde(default)]
     pub cache: CacheState,
+    /// BPM background tasks by id → startedAt ms. Fed from every agent
+    /// wire's task.started / task.terminated rows; the summary treats
+    /// entries older than the liveness horizon as dead so a crash that
+    /// never wrote task.terminated cannot show a phantom badge forever.
+    #[serde(default)]
+    pub tasks: HashMap<String, i64>,
 }
 
 pub fn state_path_for(session_id: &str, state_dir: &Path) -> std::path::PathBuf {

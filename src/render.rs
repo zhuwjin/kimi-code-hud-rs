@@ -20,7 +20,9 @@ const BAR_WIDTH: usize = 10;
 const MAX_WIDTH: usize = 200;
 
 /// Default slot order: the host footer's four slots, then the HUD extras.
-pub const DEFAULT_ITEMS: [&str; 7] = ["mode", "model", "cwd", "git", "speed", "cache", "quota"];
+pub const DEFAULT_ITEMS: [&str; 8] = [
+    "mode", "model", "tasks", "cwd", "git", "speed", "cache", "quota",
+];
 
 /// cwd slot rendering style. Short is the host footer's own abbreviation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -128,6 +130,9 @@ pub struct SlotConfig {
     /// "long" | "short".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// speed only: show the TTFT reading (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal: Option<SlotOverrides>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,6 +148,9 @@ pub struct SlotOverrides {
     pub bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// speed only: show the TTFT reading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft: Option<bool>,
 }
 
 /// A theme token a style override can reference.
@@ -235,12 +243,14 @@ pub fn resolve_slots(
     let mut formats = std::collections::HashMap::new();
     let mut cwd_normal = None;
     let mut cwd_compact = None;
+    let mut show_ttft = true;
     let Some(slots) = slots else {
         return ResolvedSlots {
             styles,
             formats,
             cwd_normal: CwdStyle::Short,
             cwd_compact: CwdStyle::Name,
+            show_ttft,
         };
     };
     for (slot, config) in slots {
@@ -275,6 +285,16 @@ pub fn resolve_slots(
         }
         if let Some(layer) = if compact_layout { config.compact.as_ref() } else { config.normal.as_ref() } {
             apply(layer.color.as_deref(), layer.bold, layer.format.as_deref());
+            if slot == "speed" {
+                if let Some(ttft) = layer.ttft {
+                    show_ttft = ttft;
+                }
+            }
+        }
+        if slot == "speed" {
+            if let Some(ttft) = config.ttft {
+                show_ttft = ttft;
+            }
         }
         if style.color.is_some() || style.bold.is_some() {
             styles.insert(slot.clone(), style);
@@ -292,6 +312,7 @@ pub fn resolve_slots(
         formats,
         cwd_normal,
         cwd_compact: cwd_compact.unwrap_or_else(|| cwd_normal.compact_fallback()),
+        show_ttft,
     }
 }
 
@@ -303,6 +324,8 @@ pub struct ResolvedSlots {
     /// compact deriving the next-shorter style unless pinned.
     pub cwd_normal: CwdStyle,
     pub cwd_compact: CwdStyle,
+    /// speed only: whether the TTFT reading may render.
+    pub show_ttft: bool,
 }
 
 fn colorize(enabled: bool, color: &str, text: &str) -> String {
@@ -485,6 +508,7 @@ pub struct RenderContext<'a> {
     pub cwd_compact: CwdStyle,
     pub styles: &'a std::collections::HashMap<String, SegmentStyle>,
     pub formats: &'a std::collections::HashMap<String, SegmentFormat>,
+    pub show_ttft: bool,
     pub layout: &'a str,
     pub color: bool,
     pub theme: Theme,
@@ -570,6 +594,23 @@ fn mode_slot(ctx: &RenderContext, palette: &Palette) -> Option<String> {
 /// The footer's model slot: model display name plus the host's thinking
 /// suffix (" thinking" / " thinking: <effort>", none when off), the whole
 /// label in plain text color exactly like chalk.hex(colors.text)(label).
+/// The footer's tasks slot: one badge per background BPM kind, zero hides
+/// it. `[2 tasks running]  [1 agent running]` in primary (not bold),
+/// two-space joined like the host composes sibling pieces.
+fn tasks_slot(ctx: &RenderContext, palette: &Palette) -> Option<String> {
+    let mut badges: Vec<String> = Vec::new();
+    if ctx.metrics.bg_tasks > 0 {
+        let noun = if ctx.metrics.bg_tasks == 1 { "task" } else { "tasks" };
+        badges.push(format!("[{} {} running]", ctx.metrics.bg_tasks, noun));
+    }
+    if ctx.metrics.bg_agents > 0 {
+        let noun = if ctx.metrics.bg_agents == 1 { "agent" } else { "agents" };
+        badges.push(format!("[{} {} running]", ctx.metrics.bg_agents, noun));
+    }
+    let text = badges.join("  ");
+    (!text.is_empty()).then(|| colorize(ctx.color, &slot_sgr(ctx, palette, "tasks", &palette.primary, false), &text))
+}
+
 fn model_segment(ctx: &RenderContext, palette: &Palette) -> Option<String> {
     let model = sanitize_terminal_text(ctx.payload.model.as_deref().unwrap_or(""));
     if model.is_empty() {
@@ -767,6 +808,9 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<
             let muted = if speed_styled { format!(" · compacted {}", c) } else { colorize(ctx.color, &palette.text_muted, &format!(" · compacted {}", c)) };
         return Some(format!("{}{}", paint(&base), muted));
         }
+        if !ctx.show_ttft {
+            return Some(paint(&base));
+        }
         return match format_ttft(metrics.ttft_ms) {
             Some(ttft) => Some(paint(&format!("{} · TTFT {}", base, ttft))),
             None => Some(paint(&base)),
@@ -788,6 +832,9 @@ fn speed_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<
             let text = format!("compacted {}", c);
             return Some(if speed_styled { text } else { colorize(ctx.color, &palette.text_muted, &text) });
         }
+    }
+    if !ctx.show_ttft {
+        return None;
     }
     format_ttft(metrics.ttft_ms).map(|ttft| format!("TTFT {}", ttft))
 }
@@ -851,6 +898,7 @@ fn slot_segment(ctx: &RenderContext, palette: &Palette, name: &str, compact: boo
     match name {
         "mode" => mode_slot(ctx, palette),
         "model" => model_segment(ctx, palette),
+        "tasks" => tasks_slot(ctx, palette),
         "cwd" => cwd_segment(ctx, palette, compact),
         "git" => git_segment(ctx, palette, short_form(ctx, "git", compact)),
         "speed" => speed_segment(ctx, palette, short_form(ctx, "speed", compact))
@@ -938,6 +986,7 @@ mod tests {
             cwd_compact: CwdStyle::Name,
             styles: empty_styles(),
             formats: empty_formats(),
+            show_ttft: true,
             layout: "normal",
             color: false,
             theme: Theme::Dark,
@@ -1086,7 +1135,7 @@ mod tests {
         );
         let normal = resolve_slots(Some(&slots), false);
         let styles_normal = &normal.styles;
-        let formats_normal = &normal.formats;
+        let _formats_normal = &normal.formats;
         // Nested normal layer wins per-field; unspecified bold survives.
         assert_eq!(
             styles_normal.get("git"),
@@ -1112,6 +1161,67 @@ mod tests {
                 bold: Some(false),
             })
         );
+    }
+
+    #[test]
+    fn background_task_badges_render() {
+        let payload = base_payload();
+        let mut m = metrics();
+        m.bg_tasks = 2;
+        let two = ctx(&payload, &m, None);
+        let line = render_hud(&two);
+        assert!(line.contains("[2 tasks running]"), "line was: {line}");
+        m.bg_agents = 1;
+        let both = ctx(&payload, &m, None);
+        let line = render_hud(&both);
+        assert!(line.contains("[2 tasks running]  [1 agent running]"), "line was: {line}");
+        // Zero on both sides hides the slot entirely.
+        m.bg_tasks = 0;
+        m.bg_agents = 0;
+        let none = ctx(&payload, &m, None);
+        assert!(!render_hud(&none).contains("running"));
+    }
+
+    #[test]
+    fn ttft_flag_hides_the_reading_but_keeps_tps() {
+        let payload = base_payload();
+        let mut m = metrics();
+        m.tps = Some(46.7);
+        m.ttft_ms = Some(1_300.0);
+        // Hidden: the t/s reading stays, TTFT goes; the bare fallback
+        // (no TPS at all) renders nothing.
+        let with_tps = RenderContext { show_ttft: false, ..ctx(&payload, &m, None) };
+        let line = render_hud(&with_tps);
+        assert!(line.contains("⚡ 47 t/s"), "line was: {line}");
+        assert!(!line.contains("TTFT"), "line was: {line}");
+        let mut m2 = metrics();
+        m2.ttft_ms = Some(1_300.0);
+        let bare = RenderContext { show_ttft: false, ..ctx(&payload, &m2, None) };
+        assert!(!render_hud(&bare).contains("TTFT"));
+    }
+
+    #[test]
+    fn resolve_slots_ttft_flag() {
+        use std::collections::HashMap;
+        // Flat false hides in both layouts.
+        let mut slots: HashMap<String, SlotConfig> = HashMap::new();
+        slots.insert(
+            "speed".to_string(),
+            SlotConfig { ttft: Some(false), ..Default::default() },
+        );
+        assert!(!resolve_slots(Some(&slots), false).show_ttft);
+        assert!(!resolve_slots(Some(&slots), true).show_ttft);
+        // Nested compact-only hiding: normal keeps it.
+        let mut slots: HashMap<String, SlotConfig> = HashMap::new();
+        slots.insert(
+            "speed".to_string(),
+            SlotConfig {
+                compact: Some(SlotOverrides { ttft: Some(false), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        assert!(resolve_slots(Some(&slots), false).show_ttft);
+        assert!(!resolve_slots(Some(&slots), true).show_ttft);
     }
 
     #[test]
