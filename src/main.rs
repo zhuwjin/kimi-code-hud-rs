@@ -8,6 +8,7 @@ mod metrics;
 mod model_config;
 mod paths;
 mod payload;
+mod pr;
 mod quota;
 mod render;
 mod runtime;
@@ -28,6 +29,7 @@ Usage:
   kimi-code-hud-rs --install        register in ~/.kimi-code/tui.toml
   kimi-code-hud-rs --uninstall      remove the tui.toml entry
   kimi-code-hud-rs --refresh-quota  refresh the quota cache (internal, silent)
+  kimi-code-hud-rs --refresh-pr     refresh the PR badge cache via gh (internal, silent)
   kimi-code-hud-rs --help           show this help
 
 The host may wipe the [status_line] entry on kimi-code upgrades — when the
@@ -97,6 +99,20 @@ fn main() -> ExitCode {
 
     if args.contains(&"--refresh-quota".to_string()) {
         return refresh_quota_main(&paths);
+    }
+    if args.contains(&"--refresh-pr".to_string()) {
+        let cwd = std::env::var("KIMI_HUD_RS_PR_CWD").unwrap_or_default();
+        let branch = std::env::var("KIMI_HUD_RS_PR_BRANCH").unwrap_or_default();
+        if !cwd.is_empty() && !branch.is_empty() {
+            pr::refresh_pr(
+                &cwd,
+                &branch,
+                &paths.pr_cache_path,
+                &paths.pr_lock_path,
+                std::env::var("KIMI_HUD_RS_PR_LOCK_TOKEN").ok().as_deref(),
+            );
+        }
+        return ExitCode::SUCCESS;
     }
     let actions: [(&str, &str, fn(&std::path::Path, &RuntimePaths) -> Result<(), String>); 2] = [
         ("--install", "install", management::install),

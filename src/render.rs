@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::git_status::GitSummary;
 use crate::metrics::MetricsSummary;
 use crate::payload::Payload;
+use crate::pr::PrInfo;
 use crate::quota::QuotaCache;
 use crate::theme::Theme;
 use crate::util::{sanitize_terminal_text, strip_ansi_sgr};
@@ -503,6 +504,7 @@ pub struct RenderContext<'a> {
     pub quota: Option<&'a QuotaCache>,
     pub metrics: &'a MetricsSummary,
     pub git: GitSummary,
+    pub pr: Option<PrInfo>,
     pub items: &'a [String],
     pub cwd_style: CwdStyle,
     pub cwd_compact: CwdStyle,
@@ -722,7 +724,7 @@ fn git_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<St
     if !sync.is_empty() {
         parts.push(sync);
     }
-    let text = if short {
+    let base = if short {
         if ctx.git.dirty {
             format!("{}*", branch)
         } else {
@@ -733,7 +735,31 @@ fn git_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<St
     } else {
         format!("{} [{}]", branch, parts.join(" "))
     };
-    Some(colorize(ctx.color, &slot_sgr(ctx, palette, "git", &palette.text_dim, false), &text))
+    let mut segment = colorize(ctx.color, &slot_sgr(ctx, palette, "git", &palette.text_dim, false), &base);
+    if let Some(pr) = &ctx.pr {
+        segment.push(' ');
+        segment.push_str(&pr_badge(ctx, palette, pr));
+    }
+    Some(segment)
+}
+
+/// `[PR#123]` inside an OSC 8 hyperlink, mirroring the host footer's
+/// formatPullRequestBadge. State colors follow GitHub's own: open in
+/// primary, merged in purple, closed-without-merge in red. The link
+/// survives NO_COLOR — it is navigation, not decoration; the URL is
+/// whitelist-validated before it is ever cached.
+fn pr_badge(ctx: &RenderContext, palette: &Palette, pr: &PrInfo) -> String {
+    let linked = format!(
+        "\x1b]8;;{}\x07[PR#{}]\x1b]8;;\x07",
+        pr.url, pr.number
+    );
+    let color = match pr.state.as_str() {
+        "OPEN" => palette.primary.clone(),
+        "MERGED" => rgb(171, 125, 248), // #AB7DF8
+        // Includes CLOSED; unknown states read closest to "not open".
+        _ => rgb(248, 81, 73), // #F85149
+    };
+    colorize(ctx.color, &color, &linked)
 }
 
 fn speed_segment(ctx: &RenderContext, palette: &Palette, short: bool) -> Option<String> {
@@ -981,6 +1007,7 @@ mod tests {
             quota,
             metrics: metrics_value,
             git: GitSummary::default(),
+            pr: None,
             items,
             cwd_style: CwdStyle::Short,
             cwd_compact: CwdStyle::Name,
@@ -1161,6 +1188,52 @@ mod tests {
                 bold: Some(false),
             })
         );
+    }
+
+    #[test]
+    fn pr_badge_appends_hyperlink_to_git_segment() {
+        let payload = base_payload();
+        let m = metrics();
+        let info = PrInfo { number: 123, url: "https://github.com/o/r/pull/123".to_string(), state: "OPEN".to_string() };
+        let with = RenderContext { pr: Some(info.clone()), ..ctx(&payload, &m, None) };
+        let line = render_hud(&with);
+        assert!(line.contains("main"), "line was: {line}");
+        // Linked and colored when colors are on.
+        let colored = RenderContext {
+            pr: Some(info),
+            color: true,
+            ..ctx(&payload, &m, None)
+        };
+        let line = render_hud(&colored);
+        let expected_link = "\x1b]8;;https://github.com/o/r/pull/123\x07[PR#123]\x1b]8;;\x07";
+        let palette = dark_palette();
+        assert!(
+            line.contains(&format!("{}{}", palette.primary, expected_link)),
+            "line was: {line:?}"
+        );
+        // Merged renders purple, closed-without-merge red, never primary.
+        for (state, color) in [("MERGED", rgb(171, 125, 248)), ("CLOSED", rgb(248, 81, 73))] {
+            let ctx = RenderContext {
+                pr: Some(PrInfo {
+                    number: 9,
+                    url: "https://github.com/o/r/pull/9".to_string(),
+                    state: state.to_string(),
+                }),
+                color: true,
+                ..ctx(&payload, &m, None)
+            };
+            let line = render_hud(&ctx);
+            assert!(line.contains(&format!("{}\x1b]8;;https://github.com/o/r/pull/9", color)), "{state}: {line:?}");
+            assert!(!line.contains(&format!("{}\x1b]8;;https://github.com/o/r/pull/9", dark_palette().primary)), "{state}: {line:?}");
+        }
+
+        // NO_COLOR keeps the hyperlink, drops the paint.
+        let plain = RenderContext {
+            pr: Some(PrInfo { number: 123, url: "https://github.com/o/r/pull/123".to_string(), state: "OPEN".to_string() }),
+            ..ctx(&payload, &m, None)
+        };
+        let line = render_hud(&plain);
+        assert!(line.contains(expected_link), "line was: {line:?}");
     }
 
     #[test]

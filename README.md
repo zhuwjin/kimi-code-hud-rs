@@ -2,7 +2,7 @@
 
 自定义底部状态栏（HUD）for [Kimi Code CLI](https://www.kimi.com/) —— [kimi-code-hud](https://github.com/FinbackYu/kimi-code-hud)（Node.js 版）的 Rust 移植，单一可执行文件，无 Node 运行时依赖。
 
-在终端 TUI 底部显示：与原版 footer 完全一致的四个 slot（模式徽章 `auto`/`yolo`/`plan`/`swarm`、模型与思考强度、路径、Git 徽章 `main [+3 -1 ↑2 ↓1]`），外加 HUD 追加段：生成速度（TPS / TTFT / `gen` 计时）、`/compact` 压缩计时、会话缓存命中率、Kimi 托管订阅额度（5h / 7d 柱条 + 百分比 + 重置倒计时）。
+在终端 TUI 底部显示：与原版 footer 完全一致的四个 slot（模式徽章 `auto`/`yolo`/`plan`/`swarm`、模型与思考强度、路径、Git 徽章 `main [+3 -1 ↑2↓1] [PR#123]`——PR 徽章带 OSC 8 超链接，支持的终端可 Cmd+Click 打开），外加 HUD 追加段：生成速度（TPS / TTFT / `gen` 计时）、`/compact` 压缩计时、会话缓存命中率、Kimi 托管订阅额度（5h / 7d 柱条 + 百分比 + 重置倒计时）。
 
 与 Node 版的差异（有意为之）：
 
@@ -76,6 +76,7 @@ Kimi Code 的 `~/.kimi-code/tui.toml` 支持 `[status_line]` 自定义命令：�
 
 | 段 | 来源 |
 |---|---|
+| PR 徽章 | `gh pr view --json number,url,state`（PATH 解析防工作区投放、5s 超时、URL 白名单校验后进 OSC 8 链接；颜色随状态:OPEN 用 primary、MERGED 用紫 #AB7DF8、CLOSED 用红 #F85149(对齐 GitHub 自家配色)）。热路径只读 60 秒 TTL 缓存（按 cwd+分支），过期经文件锁去重后 spawn 分离的 `--refresh-pr` 刷新；无 PR / 无 gh 也缓存"缺席"60 秒 |
 | 分支 / 脏 / ±计数 / ↑↓ | stdin 快照（分支）+ 进程内 [gix](https://github.com/GitoxideLabs/gitoxide)（gitoxide）探测：status 算脏与 ↑↓、HEAD blob 对工作区（经 CRLF/过滤器）逐行 diff 算 +N -N。不依赖 `git` 二进制、不 spawn 子进程；结果跨进程缓存 15 秒（cwd 只存 SHA-256）。±计数与 `git diff --numstat HEAD` 同为 Myers 差异算法族，个别仓库可能有 ±个位的算法性偏差 |
 | TPS / TTFT / gen / 压缩计时 / Cache / thinking / swarm | 增量解析 `~/.kimi-code/sessions/*/session_<id>/agents/*/wire.jsonl`（main + 全部 subagent）。每 agent 维护持久化字节游标（`~/.kimi-code-hud-rs/metrics-<sessionId>.json`），每帧只读新增字节（≤1MiB），半行 JSON 跨进程无损拼接，尾部指纹检测文件原地重写。速度样本带事件时间戳，多 agent 活跃时聚合为舰队总速 `⚡ 156 t/s (3 agents @52)` |
 | thinking 强度 | wire 事件（`llm.request` / `config.update` / `profile.bind`）> 按会话固定的快照（`thinking-<sessionId>.json`，防止其他会话 `/effort` 改全局配置影响本会话）> `config.toml` 的 `[thinking]` 与模型表回退推断 |

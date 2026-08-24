@@ -21,6 +21,8 @@ pub struct RuntimePaths {
     pub hud_config_path: PathBuf,
     pub quota_cache_path: PathBuf,
     pub quota_lock_path: PathBuf,
+    pub pr_cache_path: PathBuf,
+    pub pr_lock_path: PathBuf,
     pub git_cache_path: PathBuf,
     pub tui_toml_path: PathBuf,
     pub config_toml_path: PathBuf,
@@ -43,6 +45,8 @@ impl RuntimePaths {
             hud_config_path: hud_dir.join("config.json"),
             quota_cache_path: hud_dir.join("quota.json"),
             quota_lock_path: hud_dir.join("quota-refresh.lock"),
+            pr_cache_path: hud_dir.join("pr.json"),
+            pr_lock_path: hud_dir.join("pr-refresh.lock"),
             git_cache_path: hud_dir.join("git-status-cache.json"),
             tui_toml_path: env::var_os("KIMI_HUD_RS_TUI_TOML")
                 .map(PathBuf::from)

@@ -11,6 +11,7 @@ use crate::metrics;
 use crate::model_config::{resolve_model_provider, MANAGED_KIMI_PROVIDER};
 use crate::paths::RuntimePaths;
 use crate::payload::read_stdin_payload;
+use crate::pr;
 use crate::quota;
 use crate::render::{render_hud, resolve_slots, CwdStyle, RenderContext, DEFAULT_ITEMS};
 use crate::theme::resolve_theme;
@@ -137,6 +138,31 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         );
     }
 
+    // PR badge: hot path reads the cache; a stale entry spawns the detached
+    // --refresh-pr child (gh network call, 60s TTL, lock-deduped).
+    let pr_branch = payload
+        .git_branch
+        .clone()
+        .or_else(|| git.branch.clone())
+        .filter(|b| !b.is_empty());
+    let pr_badge = pr_branch.as_ref().and_then(|branch| {
+        let look = pr::lookup_pr(
+            payload.cwd.as_deref().unwrap_or(""),
+            branch,
+            &paths.pr_cache_path,
+            now,
+        );
+        if look.stale && remaining_ms(deadline) >= REFRESH_MIN_REMAINING_MS {
+            pr::ensure_fresh_pr(
+                &paths.pr_lock_path,
+                payload.cwd.as_deref().unwrap_or(""),
+                branch,
+                true,
+            );
+        }
+        look.info
+    });
+
     let layout = layout_from(std::env::var("KIMI_HUD_RS_LAYOUT").ok().as_deref(), &hud_config);
     let resolved = resolve_slots(hud_config.slots.as_ref(), layout == "compact");
     let (cwd_style, cwd_compact) = cwd_pair_from(std::env::var("KIMI_HUD_RS_CWD").ok().as_deref(), &resolved);
@@ -158,6 +184,7 @@ pub fn render_status_line(paths: &RuntimePaths) -> (i32, Option<String>) {
         quota: quota_view.as_ref(),
         metrics: &summary,
         git,
+        pr: pr_badge,
         items: &items,
         cwd_style,
         cwd_compact,
